@@ -327,10 +327,11 @@ thing: they are quantities of the asset, set by its issuer, and PAC is not invol
 | `BurnRate` | `uint16` | The new `BurnRate.Current`, in basis points |
 
 `Check`: the asset exists and has a policy; `From == Issuer`; `TeamRate.Min <= TeamRate <= TeamRate.Max` and
-`BurnRate.Min <= BurnRate <= BurnRate.Max`; `Balance >= fee`. `Execute`: debit the fee and set the two `Current`
-values. Nothing else about the policy ever changes: not the bounds, the cap or the collector. The new rates apply to
-every transfer included after this transaction in the same block or later. A transaction that sets the current values
-again is valid and does nothing.
+`BurnRate.Min <= BurnRate <= BurnRate.Max`; if `TeamRate` is above 0, `Collector` has a holding of the asset, that is,
+it has accepted it; `Balance >= fee`. `Execute`: debit the fee and set the two `Current` values. Nothing else about
+the policy ever changes: not the bounds, the cap or the collector. The new rates apply to every transfer included
+after this transaction in the same block or later. A transaction that sets the current values again does nothing and
+obeys the same rules.
 
 An asset whose bounds satisfy `Min == Max` for both rates has fixed rates and can never be changed; its issuer holds no
 authority over them. The bounds are a promise that anyone can read in the state, as `MaxSupply` is.
@@ -338,6 +339,11 @@ authority over them. The bounds are a promise that anyone can read in the state,
 This is also the way out when the collector of an asset cannot or does not accept it: if `TeamRate.Min` is 0, the
 issuer sets `TeamRate` to 0, no team share is due, and transfers are valid again without the collector (section 3.3).
 If `TeamRate.Min` is above 0 there is no way out but the acceptance of the collector.
+
+The rule on `TeamRate` above 0 means that `AssetSetRate` can never block an asset: it cannot raise the team rate while
+the collector has not accepted, and a record is never removed, so once the collector has accepted, the rate can be
+raised for good. The only state in which transfers are blocked for lack of the collector is the one in which
+`AssetCreate` left the asset, with a team rate above 0 and a collector that has not accepted.
 
 #### 3.7 `AssetAccept` (type 12)
 
@@ -536,7 +542,8 @@ version of this PIP created the collector's record at creation, which let an iss
 naming it; now a transfer of an asset whose team rate is above 0 is invalid until the collector accepts, which costs
 nobody but the issuer that named it. The condition is on the rate and not on the existence of a policy so that the
 issuer has a way out: with `TeamRate.Min` at 0, setting the rate to 0 removes the team share, and with it the need for a
-collector that may never accept.
+collector that may never accept. `AssetSetRate` obeys the same rule, so that the issuer cannot block its own asset by
+raising the rate before the collector has accepted.
 
 **Charges known from the payload.** `Value()` is computed from the payload alone, so a wallet never has to guess a fee
 from the state, and no fee code depends on the state. Because only creation and acceptance append records, and which
@@ -627,8 +634,10 @@ Implementations MUST pass at least these. They add no rule to the Specification.
 * **Set rate.** The issuer sets a rate inside its bounds and the next transfer uses it. A value outside `[Min, Max]`, a
   non-issuer, an asset without a policy and an unknown asset fail. An asset with `Min == Max` accepts only that
   value. Bounds, cap and collector never change. With a collector that has not accepted and `TeamRate.Min` at 0,
-  setting `TeamRate` to 0 makes transfers valid again, and setting it back above 0 makes them invalid again until the
-  collector accepts. With `TeamRate.Min` above 0, only the acceptance of the collector makes them valid.
+  setting `TeamRate` to 0 makes transfers valid again, and setting it back above 0 fails until the collector
+  accepts, after which it succeeds. With `TeamRate.Min` above 0, only the acceptance of the collector makes transfers
+  valid, and an `AssetSetRate` that keeps `TeamRate` above 0 fails until then. An issuer that is its own collector is
+  never blocked. A rate of 0 for the team share is accepted whatever the state of the collector.
 * **Mint.** Only the issuer mints. A mint above `MaxSupply - Issued` fails. After a burn, a mint still cannot pass
   `MaxSupply` in total. An asset with `MaxSupply == InitialSupply` rejects every mint. A mint to an account that has not
   accepted the asset fails, including a mint by an issuer to itself when `InitialSupply` was 0 and it holds no record.
@@ -722,13 +731,14 @@ that it moves.
 
 An issuer that names a collector that cannot accept, for instance a mistyped address, makes the asset untransferable for
 every holder, burns included, as long as `TeamRate.Current` is above 0 and that collector has not accepted, and the
-collector of an asset can never be changed. If `TeamRate.Min` is 0, the issuer releases the asset by setting the team
-rate to 0, at the price of the team share. If `TeamRate.Min` is above 0, nothing releases it but the collector's
-acceptance, so such an asset with a collector other than the issuer has no way out if the address is wrong. A wallet
-MUST have the issuer confirm the collector address before it signs an `AssetCreate` with a policy, SHOULD warn when
-`TeamRate.Min` is above 0 and the collector is not the issuer, and SHOULD show an asset whose collector has not
-accepted as not yet transferable. The check costs the issuer one `AssetAccept` from the collector, or none if it names
-itself.
+collector of an asset can never be changed. That state can only come from `AssetCreate`: `AssetSetRate` cannot raise
+the team rate above 0 before the collector has accepted. If `TeamRate.Min` is 0, the issuer releases the asset by
+setting the team rate to 0, at the price of the team share. If `TeamRate.Min` is above 0, nothing releases it but the
+collector's acceptance, so such an asset with a collector other than the issuer has no way out if the address is
+wrong. A wallet MUST have the issuer confirm the collector address before it signs an `AssetCreate` with a policy,
+SHOULD warn when `TeamRate.Min` is above 0 and the collector is not the issuer, and SHOULD show an asset whose
+collector has not accepted as not yet transferable. The check costs the issuer one `AssetAccept` from the collector,
+or none if it names itself.
 
 ### Identity and spoofing
 
