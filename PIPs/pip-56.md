@@ -70,7 +70,10 @@ and the zero address is the treasury address (21 zero bytes). `Hash` is BLAKE2b-
 is byte concatenation, and a quoted string is its ASCII bytes. Fields are encoded in the order listed, using the
 encodings of the existing payloads: `Address` as in `Transfer`, and *varint* as the `Amount` of `Transfer` and the
 number of recipients of `BatchTransfer` ([PIP-39](./pip-39.md)). Decoding MUST consume exactly the declared fields,
-and trailing bytes make a payload invalid. Byte-level test vectors come with the reference implementation.
+and trailing bytes make a payload invalid. A *varint* MUST use its shortest encoding, and a longer one is invalid, so
+that a payload has a single encoding. Every count and length (recipients, symbol, bundle items) MUST be checked
+against its bound before anything is allocated or read. Byte-level test vectors come with the reference
+implementation.
 
 ### 1. Parameters
 
@@ -94,7 +97,7 @@ A new Merkle tree, `assetMerkle`, is built exactly like `accountMerkle`: leaf `i
 record is appended at the next free index, and records are never removed, so an index never changes meaning. There
 are two kinds of record.
 
-`AssetRecord` (kind `1`), 93 bytes, or 134 with a transfer policy:
+`AssetRecord` (kind `1`), 82 to 93 bytes, or 123 to 134 with a transfer policy:
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -130,7 +133,9 @@ behaves as if both rates were 0.
 | `Owner` | `Address` | An account address |
 | `Balance` | `int64` | Units held, `0 <= Balance <= MaxSupply` of the asset. May be zero |
 
-The `AssetID` of an asset is the index of its `AssetRecord`. A record is hashed over its encoding, `Hash(Bytes)`.
+The `AssetID` of an asset is the index of its `AssetRecord`. A record is hashed over its encoding, `Hash(Bytes)`. No
+record has an encoding of 64 bytes, the length of a pair of hashes (an `AssetRecord` has 82 to 134 bytes and a
+`HoldingRecord` 34), so a leaf can never be taken for an inner node of the tree.
 There is at most one `HoldingRecord` for a given `(AssetID, Owner)`. Only `AssetCreate` (for its signer, the creator)
 and `AssetAccept` (for its signer) append one, so the signature of its owner is always behind a record.
 `AssetTransfer` and `AssetMint` never append a record: they need the recipient's record to exist. A node keeps a local
@@ -273,8 +278,10 @@ rates, `team = 1`, `burn = 0` (0.495 rounds down) and `net = 98`. With `Amount =
 recipient gets all 49.
 
 `MaxRate` exists because a rate can change between the moment a user signs and the moment the transaction is included
-(section 3.6). A wallet sets it to the rate it showed, or to the `Max` of the asset to accept any change. The sender
-can never pay more than the bounds fixed at creation, and `MaxRate` narrows that bound for one transaction.
+(section 3.6). A wallet MUST set it to the sum of the current rates that it showed, and MUST NOT set it higher without
+the explicit consent of the user: an issuer that sees a transaction with a loose `MaxRate` in the pool can raise the
+rates just before it. The sender can never pay more than the bounds fixed at creation, and `MaxRate` narrows that
+bound for one transaction. A transfer that fails because a rate moved is signed again with the new value.
 
 A burn is a transfer to the zero address. It needs no payload of its own and cannot be undone: the units leave the
 supply, and `Issued` is not lowered, so burning never makes room for a new mint.
@@ -332,7 +339,9 @@ thing: they are quantities of the asset, set by its issuer, and PAC is not invol
 that is, it has accepted it; `Balance >= fee`. `Execute`: debit the fee and set `TeamRate.Current` and
 `BurnRate.Current` to the new values. Nothing else about the policy ever changes: not the bounds, the cap or the
 collector. The new rates apply to every transfer included after this transaction in the same block or later. A
-transaction that sets the current values again does nothing and obeys the same rules.
+transaction that sets the current values again does nothing and obeys the same rules. There is no nonce, so two
+`AssetSetRate` signed one after the other may be included in either order; an issuer that wants a given final value
+waits for the first to be included before it signs the second.
 
 An asset whose bounds satisfy `Min == Max` for both rates has fixed rates and can never be changed; its issuer holds no
 authority over them. The bounds are a promise that anyone can read in the state, as `MaxSupply` is.
@@ -393,6 +402,8 @@ fee, lock time or signature of its own. These rules are consensus rules:
    over the entries of its list, using the bundle ID for a bundle. The root therefore commits to the packing, and
    nobody can repack a block without changing its hash. A proof that an item is in a block is a proof of its bundle
    and the list of at most 8 IDs.
+7. A transaction ID appears at most once in a block, as an item of one bundle, of two bundles, or as any other entry
+   of the list. A block that repeats one is invalid, so a transaction cannot be run twice in the same block.
 
 The wire encoding of a bundle belongs to the reference implementation. It MUST be deterministic and carry only a count
 and the items.
@@ -400,7 +411,9 @@ and the items.
 #### 4.2 Packing
 
 The proposer does the packing, and no user does anything. It takes asset transactions from its asset pool in arrival
-order, drops any that no longer pass `Check` against the state of the block under construction, fills bundles of
+order, skips any that do not pass `Check` against the state of the block under construction (and keeps them in its
+pool, since an earlier item of the same block can make a later one valid: an `AssetAccept` before a transfer to the
+account that signed it, so a proposer SHOULD try the skipped ones again after the others), fills bundles of
 `MaxBundleItems`, and stops at `MaxAssetTxPerBlock`. When the first bundle is full it starts a second, and so on; the
 last one may be partial. It SHOULD place bundles after the other transactions. What does not fit stays in the pool for
 the next block, until its lock time expires, and the signer then signs it again.
@@ -414,7 +427,8 @@ Two limits bound two different resources.
   slots of a block. Rules 1, 3 and 4 make this a guarantee and not a policy.
 * **Work.** A bundle saves slots and the header of each transaction, not signature checks: every item is verified,
   executed and written to the state as it would be alone. `MaxAssetTxPerBlock` is what bounds this work and the growth
-  of the state, and it is the number that a benchmark must set (Reference Implementation).
+  of the state, and it is the number that a benchmark must set (Reference Implementation). Any limit that a block has
+  in bytes applies to the bytes of the items, so that a bundle cannot be used to get around it.
 
 This is a consensus rule and not a fee market: whatever the demand for assets, it cannot take more than these slots
 and this work from a block.
@@ -423,6 +437,9 @@ and this work from a block.
 
 * `Sandbox` exposes reads and writes of asset records, and the node adds the tree, its store prefix and the extended
   root. `executeBlock` does not change: there is no per-block hook.
+* The local index from `(AssetID, Owner)` to a record is a cache, and execution is defined by the tree. A node MUST
+  rebuild or verify it after an unclean shutdown, and MUST stop, not continue, when a lookup disagrees with the tree:
+  two nodes with different indexes would disagree on the validity of a block.
 * Block validation enforces the rules of section 4.1 and computes the transaction root over the entries of the list.
   The block body gains one kind of entry, the bundle. Store indexes (transaction by ID, replay check) work on the
   items, so a transaction is found and replay-protected whether or not it sits in a bundle.
@@ -433,7 +450,10 @@ and this work from a block.
   them. Fee estimation uses the same fixed fee as `Transfer`, plus `Value()`. A pool MAY drop an `AssetTransfer` or
   `AssetMint` whose recipient has not accepted the asset, and an `AssetTransfer` of an asset whose team rate is above 0
   and whose collector has not accepted it, since neither can be valid until an `AssetAccept` or an `AssetSetRate`
-  lands.
+  lands. A pool SHOULD run the checks in the order of their cost: `BasicCheck`, then the PAC balance, then the
+  signature, then the asset-state `Check`. It SHOULD also limit the number of pending asset transactions per sender,
+  because each one can be valid alone against the current state while all together are not (several transfers of the
+  same units), and without a limit one funded account can fill the pool with transactions that the proposer will skip.
 * RPC (mandatory for the official node, on every surface it ships): payload type values `8` to `12` in `PayloadType`;
   `GetRaw*Transaction` builders for the five payloads; `GetAsset`, returning the fields of section 2.1, the policy
   with its current rates and bounds and whether its collector has accepted it (an asset whose team rate is above 0
@@ -654,6 +674,15 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   supply after every test: asset transactions only move PAC to the treasury and pay the fee.
 * **Determinism.** Two nodes with different local indexes and one restarted from a pruned store obtain the same root
   and the same `GetAsset`. Every payload decodes and re-encodes to the same bytes, and trailing bytes are rejected.
+* **Hostile inputs.** Invalid: a varint that is longer than its shortest encoding, 9 recipients, a symbol length of
+  13, a bundle count of 0 or 9, each rejected before any allocation of that size. A block that repeats a transaction
+  ID, in one bundle, in two, or as a bundle item and a top-level entry, is invalid. A transaction executed in an
+  earlier block and included again is invalid. A signature made for a PAC transaction does not validate an asset
+  payload. A node whose local index disagrees with the tree stops. A rate raised in the pool after a transfer was
+  signed with a tight `MaxRate` makes that transfer fail, and does not charge more. Two `AssetSetRate` included in the
+  opposite order of their signing leave the rates of the later inclusion. An `AssetAccept` and a transfer to the
+  account that signed it, skipped in the first pass of a proposer, are packed in the same block after a second pass. No
+  record encoding has a length of 64 bytes.
 
 ## Reference Implementation
 
@@ -692,6 +721,11 @@ accounts per 1 000-transaction block with `BatchTransfer`, about 830 MB a day, s
 Pactus already accepts for accounts. Both the cap and `RecordCharge` are constants that a later version can change.
 Removal of empty holdings, with a refund, is left for a later PIP.
 
+A proposer is the one attacker that this PIP cannot price out with the fixed fee: if that fee goes to the proposer
+(the path is not changed here), a proposer can fill its own blocks with asset transactions at no net cost for the fee.
+It still pays `RecordCharge` for every record, which goes to the treasury and never back to it, and it still cannot
+exceed `MaxAssetTxPerBlock` per block, so the figures above are the bound for a proposer too.
+
 An account that accepts an asset by mistake keeps an empty record for ever, and cannot reject later transfers of it,
 since anyone who holds the asset may send it. That costs the account nothing more than its own acceptance, and it
 never had to accept.
@@ -721,12 +755,12 @@ An issuer with a variable rate can move it to its `Max` at any time, and a `Max`
 sold while the rate is low and then turned into one that keeps every transfer. The bounds are public and can never be
 widened, so the damage is limited to what they say, but only if the user reads them. A wallet MUST show the `Max`
 rates, and whether a rate is variable, before the user buys the asset, SHOULD warn when the two `Max` rates are high,
-and MUST set `MaxRate` on every transfer it builds. A rate change that lands between signing and inclusion cannot
-take more than `MaxRate`. A collector that is the issuer, or a key that the issuer controls, receives the team share
-without any further rule, so users judge the asset by the issuer, not by the symbol. The shares round down, so many
-small transfers can avoid a rate; this costs the issuer revenue and nobody else anything. A transfer rate does not
-apply to a mint or to a burn. A later PIP for exchanges MUST say how an atomic swap treats the rates of the assets
-that it moves.
+and MUST set `MaxRate` on every transfer it builds to the rate it showed, never to the `Max` of the asset unless the
+user asks for it. A rate change that lands between signing and inclusion cannot take more than `MaxRate`. A collector
+that is the issuer, or a key that the issuer controls, receives the team share without any further rule, so users
+judge the asset by the issuer, not by the symbol. The shares round down, so many small transfers can avoid a rate; this
+costs the issuer revenue and nobody else anything. A transfer rate does not apply to a mint or to a burn. A later PIP
+for exchanges MUST say how an atomic swap treats the rates of the assets that it moves.
 
 An issuer that names a collector that cannot accept, for instance a mistyped address, makes the asset untransferable for
 every holder, burns included, as long as `TeamRate.Current` is above 0 and that collector has not accepted, and the
@@ -745,7 +779,28 @@ Symbols are not unique and anyone can create one, such as `USDT`. Opt-in stops a
 wallet, but a user can still accept a look-alike by following a link or a QR code. A wallet MUST show the `AssetID` and
 the issuer address and not only the symbol, MUST NOT trust a symbol, and MUST ask for confirmation, with those two
 values, before it signs an `AssetAccept`. The symbol `PAC` is reserved so that no asset looks like the coin. An
-`AssetID` in a link is a request and not an authorization: nothing happens until the user signs.
+`AssetID` in a link is a request and not an authorization: nothing happens until the user signs. Symbols can also
+mislead by their digits (`0` and `O`, `1` and `I`), and so can `Decimals`: two assets with one symbol, one with 9
+decimals and one with none, show quantities that differ by a factor of a billion. A wallet shows the decimals, and
+amounts in the units of the asset that it reads from the state.
+
+### Hostile inputs and what the user signs
+
+* **An `AssetID` is known only after inclusion.** It is the position of the record in the tree, assigned when
+  `AssetCreate` executes. Another creation can land first, so a wallet MUST NOT announce, accept or send an `AssetID`
+  that it has not read from an included `AssetCreate`. Otherwise someone who sees a pending creation can take the ID,
+  give it the same symbol, and have the announced ID accepted.
+* **Metadata is attacker-chosen.** The document behind `MetaHash` can say anything. Wallets and explorers MUST check
+  the hash before they use it, cap its size, accept only fixed content types, run no active content from it, and
+  fetch no address that it embeds without the user asking.
+* **Blind signing.** A wallet MUST show the decoded payload before it signs: the type, the `AssetID`, the symbol, the
+  issuer, each recipient with its gross and net amount, and the rates and `MaxRate`. It MUST NOT sign a payload that it
+  cannot decode, and a signing device that cannot show these values SHOULD refuse asset payloads.
+* **Pool flooding.** Funded accounts can flood the asset pool with transactions that are valid alone and invalid
+  together. The per-sender limit and the cost-ordered checks of section 5 bound this; the pool is local policy, so a
+  node that does not apply them loses its own memory and nothing else.
+* **Index corruption.** A local index that disagrees with the tree is a consensus fault, not a cache miss, which is
+  why section 5 makes a node stop.
 
 ### Keys, replay and burns
 
