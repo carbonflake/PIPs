@@ -66,7 +66,8 @@ governance, freezing, clawback and metadata updates are outside this PIP.
 ## Specification
 
 Integers are little-endian and fixed width unless a field is marked *varint*. `Address` is the 21-byte Pactus address,
-and the zero address is the treasury address (21 zero bytes). Fields are encoded in the order listed, using the
+and the zero address is the treasury address (21 zero bytes). `Hash` is BLAKE2b-256, the hash Pactus already uses, `||`
+is byte concatenation, and a quoted string is its ASCII bytes. Fields are encoded in the order listed, using the
 encodings of the existing payloads: `Address` as in `Transfer`, and *varint* as the `Amount` of `Transfer` and the
 number of recipients of `BatchTransfer` ([PIP-39](./pip-39.md)). Decoding MUST consume exactly the declared fields,
 and trailing bytes make a payload invalid. Byte-level test vectors come with the reference implementation.
@@ -323,15 +324,15 @@ thing: they are quantities of the asset, set by its issuer, and PAC is not invol
 | --- | --- | --- |
 | `From` | `Address` | MUST be the `Issuer` |
 | `AssetID` | `uint32` | |
-| `TeamRate` | `uint16` | The new `TeamRate.Current`, in basis points |
-| `BurnRate` | `uint16` | The new `BurnRate.Current`, in basis points |
+| `NewTeamRate` | `uint16` | The new `TeamRate.Current`, in basis points |
+| `NewBurnRate` | `uint16` | The new `BurnRate.Current`, in basis points |
 
-`Check`: the asset exists and has a policy; `From == Issuer`; `TeamRate.Min <= TeamRate <= TeamRate.Max` and
-`BurnRate.Min <= BurnRate <= BurnRate.Max`; if `TeamRate` is above 0, `Collector` has a holding of the asset, that is,
-it has accepted it; `Balance >= fee`. `Execute`: debit the fee and set the two `Current` values. Nothing else about
-the policy ever changes: not the bounds, the cap or the collector. The new rates apply to every transfer included
-after this transaction in the same block or later. A transaction that sets the current values again does nothing and
-obeys the same rules.
+`Check`: the asset exists and has a policy; `From == Issuer`; `TeamRate.Min <= NewTeamRate <= TeamRate.Max` and
+`BurnRate.Min <= NewBurnRate <= BurnRate.Max`; if `NewTeamRate` is above 0, `Collector` has a holding of the asset,
+that is, it has accepted it; `Balance >= fee`. `Execute`: debit the fee and set `TeamRate.Current` and
+`BurnRate.Current` to the new values. Nothing else about the policy ever changes: not the bounds, the cap or the
+collector. The new rates apply to every transfer included after this transaction in the same block or later. A
+transaction that sets the current values again does nothing and obeys the same rules.
 
 An asset whose bounds satisfy `Min == Max` for both rates has fixed rates and can never be changed; its issuer holds no
 authority over them. The bounds are a promise that anyone can read in the state, as `MaxSupply` is.
@@ -537,13 +538,13 @@ it. It also simplifies the rules. A transfer or a mint never appends a record, s
 order to fix, their charge is 0, and the tree grows only when its owner asks and pays. The cost is two steps to
 receive an asset, and a recipient that needs a little PAC before it can accept. To the knowledge of the author, the
 XRP Ledger, Stellar and Algorand also ask the receiver to opt in. There is no exception: the creator's own record is
-appended by the creation it signed, and the collector named by a policy must accept like anyone else. An earlier
-version of this PIP created the collector's record at creation, which let an issuer put an asset on any account by
-naming it; now a transfer of an asset whose team rate is above 0 is invalid until the collector accepts, which costs
-nobody but the issuer that named it. The condition is on the rate and not on the existence of a policy so that the
-issuer has a way out: with `TeamRate.Min` at 0, setting the rate to 0 removes the team share, and with it the need for a
-collector that may never accept. `AssetSetRate` obeys the same rule, so that the issuer cannot block its own asset by
-raising the rate before the collector has accepted.
+appended by the creation it signed, and the collector named by a policy must accept like anyone else. Creating the
+collector's record at creation would let an issuer put an asset on any account by naming it. Instead, a transfer of an
+asset whose team rate is above 0 is invalid until the collector accepts, which costs nobody but the issuer that named
+it. The condition is on the rate and not on the existence of a policy so that the issuer has a way out: with
+`TeamRate.Min` at 0, setting the rate to 0 removes the team share, and with it the need for a collector that may never
+accept. `AssetSetRate` obeys the same rule, so that the issuer cannot block its own asset by raising the rate before
+the collector has accepted.
 
 **Charges known from the payload.** `Value()` is computed from the payload alone, so a wallet never has to guess a fee
 from the state, and no fee code depends on the state. Because only creation and acceptance append records, and which
@@ -573,10 +574,9 @@ to move it.
    still set `MaxBundleItems` to 1 to get one slot per transaction.
 9. **Rates that are fixed, or that have no bounds.** Fixed rates are possible (`Min == Max`) but not the only choice.
    Unbounded rates would let an issuer take any share of any transfer.
-10. **The sender pays for the recipient's record, with no opt-in** (an earlier draft of this PIP and, to the knowledge
-    of the author, the model of Cardano and Solana, with a refundable reserve in each). Simpler to use, but anyone can
-    put an asset in any wallet, and without a way to remove records the state grows with the spam. Set aside for the
-    opt-in of section 3.7.
+10. **The sender pays for the recipient's record, with no opt-in** (to the knowledge of the author, the model of
+    Cardano and Solana, with a refundable reserve in each). Simpler to use, but anyone can put an asset in any wallet,
+    and without a way to remove records the state grows with the spam. Set aside for the opt-in of section 3.7.
 11. **Higher charges and wallets that hide unknown assets.** No consensus change, but it prices spam instead of
     stopping it and leaves the records in the state. It remains a rule for wallets in any case.
 
@@ -603,12 +603,12 @@ Implementations MUST pass at least these. They add no rule to the Specification.
 * **Create.** A fixed asset, a minting asset and an asset with `InitialSupply == 0` are created. Rejected: an empty
   symbol, 13 bytes, lowercase, a symbol of `PAC`, `Decimals` 10, `MaxSupply` 0 or above `MaxAssetSupply`,
   `InitialSupply` above `MaxSupply`, insufficient PAC, a treasury or validator `From`. The charge reaches the
-  treasury, and the creator's holding is created only if `InitialSupply > 0` or the policy names the creator as
-  collector, and charged for. With a policy, rejected: `Current`
-  outside `[Min, Max]`, a `Max` above 10 000, `TeamRate.Max + BurnRate.Max` above 10 000, all `Max` at 0, `TeamCap` of
-  0, a validator `Collector`. With a policy that names the creator as collector, the creator's holding exists right
-  after creation, at balance 0 if `InitialSupply` is 0, and is appended once. With a policy that names another account
-  as collector, no record is appended for that account, and its balance of records and PAC is unchanged.
+  treasury, and the creator's holding is created, and charged for, only if `InitialSupply > 0` or the policy names the
+  creator as collector. With a policy, rejected: `Current` outside `[Min, Max]`, a `Max` above 10 000,
+  `TeamRate.Max + BurnRate.Max` above 10 000, all `Max` at 0, `TeamCap` of 0, a validator `Collector`. With a policy
+  that names the creator as collector, the creator's holding exists right after creation, at balance 0 if
+  `InitialSupply` is 0, and is appended once. With a policy that names another account as collector, no record is
+  appended for that account, and its PAC balance is unchanged.
 * **Accept.** An account accepts an asset: a holding with balance 0 is appended at the next index, `RecordCharge`
   reaches the treasury, and the account can then receive. Rejected: an unknown asset, a second `AssetAccept` of the same
   asset by the same account (nothing is charged twice), insufficient PAC, a treasury or validator `From`. A creator
@@ -621,9 +621,8 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   not accepted it (even for a transfer made only of burns), and 8 recipients of `2^62` each (the overflow case of
   PIP-54), which fails before any addition. The same asset with `TeamRate.Current` at 0 accepts transfers although
   the collector has not accepted, and no team share is paid. A transfer to the zero address needs no holding, raises
-  `Burned` and creates no record.
-  A holding that reaches zero stays. `Value()` is 0, and the number of records of the tree is the same before and
-  after any transfer.
+  `Burned` and creates no record. A holding that reaches zero stays. `Value()` is 0, and the number of records of the
+  tree is the same before and after any transfer.
 * **Rates.** The example of section 3.3 gives `team = 15 000`, `burn = 5 000` and `net = 980 000`. With the same rates,
   99 gives `team = 1`, `burn = 0`, `net = 98`, and 49 gives `team = burn = 0`. A transfer of `2^63 - 1` with rates
   of 10 000 in total is computed without leaving the `int64` range, and `team + burn + net` equals `Amount` for a
@@ -661,8 +660,7 @@ Implementations MUST pass at least these. They add no rule to the Specification.
 None yet. Before this PIP leaves Draft, a pull request will add the five payloads, the asset tree, the extended root,
 the bundles, the block cap and the RPC to the Pactus node, and report on stated hardware: the time to validate a block
 with `MaxAssetTxPerBlock` asset transactions of 8 recipients each, for BLS, Ed25519 and secp256k1 senders, which is
-what sets the cap; the cost of a tree update, the size of the store per record, and the effect on
-state sync.
+what sets the cap; the cost of a tree update, the size of the store per record, and the effect on state sync.
 
 ### Open items of this draft
 
@@ -713,8 +711,9 @@ whose packing breaks section 4.1 is invalid even if every item is valid.
 
 A minting asset gives its issuer the power to create units up to `MaxSupply`. A wallet MUST show whether an asset is
 minting and how much room is left, before the user buys it. The issuer key cannot be replaced: if it is lost, no more
-units are minted; if it is stolen, the thief can mint up to the cap. An asset with `MaxSupply == InitialSupply` has no
-such risk. Nobody can freeze, claw back or change the metadata of an asset.
+units are minted and the rates stay where they were; if it is stolen, the thief can mint up to the cap and move the
+rates inside their bounds. An asset with `MaxSupply == InitialSupply` and fixed rates has no such risk. Nobody can
+freeze, claw back or change the metadata of an asset.
 
 ### Transfer rates
 
