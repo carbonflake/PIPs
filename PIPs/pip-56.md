@@ -53,7 +53,8 @@ every balance for ever.
 This PIP keeps the design as small as the problem allows, in the spirit of Pactus: robust, reliable and light.
 
 * **Robust.** Five payloads and one rule per payload. Every amount is bounded and every sum checked before it is
-  added ([PIP-54](./pip-54.md)). The only authority an asset can have is a mint capped at creation.
+  added ([PIP-54](./pip-54.md)). The only authorities an asset can have are a mint capped at creation and rates that
+  move inside bounds fixed at creation.
 * **Reliable.** Assets carry exactly the trust of PAC: the validators check every rule, and nobody else is trusted.
   Nothing depends on an operator, an indexer or an off-chain data store.
 * **Light.** No per-block hook, no signature scheme, no epoch, no registry. The load that assets put on L1 is bounded
@@ -82,7 +83,7 @@ and a later version may change them ([PIP-51](./pip-51.md)). A change never alte
 | `MaxRecipients` | 8 | Recipients of one `AssetTransfer`, as `BatchTransfer` |
 | `MaxDecimals` | 9 | Same as PAC |
 | `MaxAssetSupply` | 2^63 - 1 | Largest quantity of any asset, the largest `int64` |
-| `RecordCharge` | 0.001 PAC | Paid to the treasury for each record that `AssetCreate` or `AssetAccept` appends (section 3.5) |
+| `RecordCharge` | 0.001 PAC | Paid to the treasury for each record that `AssetCreate` or `AssetAccept` can append (3.5) |
 
 ### 2. State
 
@@ -180,8 +181,9 @@ TypeAssetAccept   = Type(12)
 * `Value()` is the PAC charge of section 3.5, `RecordCharge * R`. It is computed from the payload alone, subtracted from
   `From` together with the fee, and credited to the treasury account. Every sum that involves `Value()`, the fee or a
   balance MUST be rejected before it exceeds `MaxNanoPAC` ([PIP-54](./pip-54.md)).
-* Every asset quantity is an `int64` with `1 <= quantity <= MaxAssetSupply`. A sum of quantities MUST be checked
-  before it is added, in the form `total > MaxAssetSupply - amount`.
+* Every asset quantity is an `int64` with `1 <= quantity <= MaxAssetSupply`, except the `InitialSupply` of
+  `AssetCreate`, which may be 0. A sum of quantities MUST be checked before it is added, in the form
+  `total > MaxAssetSupply - amount`.
 * An asset transaction is an ordinary transaction, and it travels through the network and the pools as one. In a block
   it is carried only inside a bundle (section 4).
 * A recipient is an account address. Treasury and validator addresses are rejected, because nothing could move the
@@ -216,7 +218,7 @@ record, so its record is created here. A creator with `InitialSupply == 0` that 
 record yet: to mint to itself, it accepts the asset like anyone else.
 
 The asset is **minting** if `MaxSupply > InitialSupply`. If they are equal, nobody can ever create another unit and
-nobody holds any authority over the asset: the supply is fixed for ever. Symbols are labels, not names: they are not
+nobody holds any authority over its supply: the supply is fixed for ever. Symbols are labels, not names: they are not
 unique, and the `AssetID` is the identity.
 
 #### 3.3 `AssetTransfer` (type 9)
@@ -248,8 +250,8 @@ at most `D`, `team + burn <= Amount`, so `net >= 0`. Rounding is down, so a tran
 owes nothing. Without a policy, `team` and `burn` are 0 and `net` is `Amount`. An entry to the zero address pays no
 rate: the whole `Amount` is burned.
 
-`BasicCheck`: the number of recipients is in range; no `To` appears twice; no `To` equals `From`; every amount is in
-range; the sum of the amounts, checked as in section 3.1, does not exceed `MaxAssetSupply`.
+`BasicCheck`: `MaxRate <= 10 000`; the number of recipients is in range; no `To` appears twice; no `To` equals `From`;
+every amount is in range; the sum of the amounts, checked as in section 3.1, does not exceed `MaxAssetSupply`.
 `Check`: the asset exists; `TeamRate.Current + BurnRate.Current <= MaxRate` (both are 0 without a policy); `From` has a
 holding with `Balance >= total`; every `To` that is not the zero address has a holding of the asset; `Balance >= fee`
 in PAC; no entry to an account has `net == 0`.
@@ -338,8 +340,8 @@ authority over them. The bounds are a promise that anyone can read in the state,
 | `AssetID` | `uint32` | |
 
 `Value()` is `RecordCharge`. `Check`: the asset exists; `From` has no holding of the asset yet;
-`Balance >= Value + fee`. `Execute`: debit `Value + fee` and credit `Value` to the treasury; append a `HoldingRecord`
-of `From` for the asset with `Balance = 0`.
+`Balance >= Value + fee`; the tree has room for one more record. `Execute`: debit `Value + fee` and credit `Value` to
+the treasury; append a `HoldingRecord` of `From` for the asset with `Balance = 0`.
 
 Only the account itself can accept, because only its signature is valid. From then on it can receive transfers and
 mints of the asset. There is no way to refuse a transfer once the record exists, and none to remove the record: an
@@ -392,7 +394,7 @@ Two limits bound two different resources.
 
 * **Slots.** A bundle is one entry of the 1 000-transaction list. Whatever the senders, asset transactions take at most
   `ceil(MaxAssetTxPerBlock / MaxBundleItems)` slots, 25 with the values above, which leaves PAC at least 97.5 % of the
-  slots of a block. Rules 3 and 4 make this a guarantee and not a policy.
+  slots of a block. Rules 1, 3 and 4 make this a guarantee and not a policy.
 * **Work.** A bundle saves slots and the header of each transaction, not signature checks: every item is verified,
   executed and written to the state as it would be alone. `MaxAssetTxPerBlock` is what bounds this work and the growth
   of the state, and it is the number that a benchmark must set (Reference Implementation).
@@ -487,8 +489,8 @@ cost is that a transfer to the zero address by mistake cannot be undone, which w
 
 **Mint capped at creation.** Issuers need minting (editions, game items, a stablecoin). Holders need a bound. A cap
 that is fixed at creation, and that burning does not reopen, is a promise that anyone can read in the state.
-`MaxSupply == InitialSupply` is the strongest form and has no authority at all. Transferring or renouncing the issuer
-role is left out: it adds a payload and a way to lose control by mistake.
+`MaxSupply == InitialSupply` is the strongest form and has no mint authority at all. Transferring or renouncing the
+issuer role is left out: it adds a payload and a way to lose control by mistake.
 
 **No allowance.** The approve and spend-from pattern is where most user losses on token chains happen. Leaving it out
 keeps the trust model simple: only the holder can move units, and nobody else can ever be allowed to.
@@ -532,8 +534,8 @@ to move it.
 3. **A smart-contract VM.** Attack surface out of proportion to the tokens this PIP targets.
 4. **Item records inside an asset (collections).** Set aside: more state and rules, and the single record covers the
    need at the cost of more creations.
-5. **Refundable deposits per balance entry.** Would bound state by supply but needs deletion of records, which no
-   Pactus tree has, and a rule about whose deposit it is when a sender creates the entry. Not worth it now.
+5. **Refundable deposits per balance entry.** Would bound state by what is in use but needs deletion of records, which
+   no Pactus tree has. Not worth it now; see the Future Extensions.
 6. **Fees in the assets themselves.** No common unit, and no way for a new holder to pay a first fee. The rates of
    section 3.3 are not fees of this kind: they are a property of the asset that its issuer chose, and they do not pay
    for the transaction.
@@ -544,9 +546,10 @@ to move it.
    still set `MaxBundleItems` to 1 to get one slot per transaction.
 9. **Rates that are fixed, or that have no bounds.** Fixed rates are possible (`Min == Max`) but not the only choice.
    Unbounded rates would let an issuer take any share of any transfer.
-10. **The sender pays for the recipient's record, with no opt-in** (an earlier draft of this PIP, and the model of
-    Cardano and Solana, with a refundable reserve in each). Simpler to use, but anyone can put an asset in any wallet,
-    and without a way to remove records the state grows with the spam. Set aside for the opt-in of section 3.7.
+10. **The sender pays for the recipient's record, with no opt-in** (an earlier draft of this PIP and, to the knowledge
+    of the author, the model of Cardano and Solana, with a refundable reserve in each). Simpler to use, but anyone can
+    put an asset in any wallet, and without a way to remove records the state grows with the spam. Set aside for the
+    opt-in of section 3.7.
 11. **Higher charges and wallets that hide unknown assets.** No consensus change, but it prices spam instead of
     stopping it and leaves the records in the state. It remains a rule for wallets in any case.
 
@@ -567,8 +570,9 @@ sync and snapshots MUST carry the asset tree from then on. Testnet SHOULD activa
 
 Implementations MUST pass at least these. They add no rule to the Specification.
 
-* **Activation and root.** Types 8 to 12 are rejected below `V`. The first block of `V` has the extended root with
-  `assetRoot` equal to 32 zero bytes. The root changes when a record changes, and a restart reloads the same root.
+* **Activation and root.** The five asset payload types are rejected below `V`. The first block of `V` has the
+  extended root with `assetRoot` equal to 32 zero bytes. The root changes when a record changes, and a restart reloads
+  the same root.
 * **Create.** A fixed asset, a minting asset and an asset with `InitialSupply == 0` are created. Rejected: an empty
   symbol, 13 bytes, lowercase, a symbol of `PAC`, `Decimals` 10, `MaxSupply` 0 or above `MaxAssetSupply`,
   `InitialSupply` above `MaxSupply`, insufficient PAC, a treasury or validator `From`. The charge reaches the
@@ -582,10 +586,11 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   and a creator with an initial supply hold a record from creation, and cannot accept again. An accept and a transfer
   to that account in one bundle, in that order, both succeed; in the other order the transfer makes the block invalid.
 * **Transfer.** One recipient and eight succeed; nine fail. Rejected: a repeated `To`, `To == From`, a validator
-  recipient, an amount of 0 or below, an unknown asset, a balance that is too small, a recipient that has not
-  accepted the asset, and 8 recipients of `2^62` each (the overflow case of PIP-54), which fails before any addition. A
-  transfer to the zero address needs no holding, raises `Burned` and creates no record. A holding that reaches zero
-  stays. `Value()` is 0, and the number of records of the tree is the same before and after any transfer.
+  recipient, an amount of 0 or below, a `MaxRate` above 10 000, an unknown asset, a balance that is too small, a
+  recipient that has not accepted the asset, and 8 recipients of `2^62` each (the overflow case of PIP-54), which
+  fails before any addition. A transfer to the zero address needs no holding, raises `Burned` and creates no record.
+  A holding that reaches zero stays. `Value()` is 0, and the number of records of the tree is the same before and
+  after any transfer.
 * **Rates.** The example of section 3.3 gives `team = 15 000`, `burn = 5 000` and `net = 980 000`. With the same rates,
   99 gives `team = 1`, `burn = 0`, `net = 98`, and 49 gives `team = burn = 0`. A transfer of `2^63 - 1` with rates
   of 10 000 in total is computed without leaving the `int64` range, and `team + burn + net` equals `Amount` for a
@@ -603,7 +608,7 @@ Implementations MUST pass at least these. They add no rule to the Specification.
 * **Bundles.** A block with 200 asset transactions in 25 full bundles and 975 other transactions is valid; 201 asset
   transactions are invalid. A block with 17 asset transactions in a bundle of 8, a bundle of 8 and a bundle of 1 is
   valid, and the same 17 in a bundle of 8, a bundle of 5 and a bundle of 4 is invalid (two partial bundles). Invalid: an
-  empty bundle, a bundle of 9, an asset transaction outside any bundle, a bundle that holds a `Transfer` or another
+  empty bundle, a bundle of 9, an asset transaction outside any bundle, a bundle that holds a PAC `Transfer` or another
   bundle, and a bundle in a block below `V`. An item with a bad signature, an expired lock time, an ID that was already
   executed or a balance that is too small makes the block invalid. Two items of one sender in one bundle run in order.
   The state root after a block with bundles equals the one after the same block with the bundles replaced by their
@@ -659,7 +664,7 @@ never had to accept.
 ### Block capacity
 
 The bundle rules keep assets to at most 25 slots of a block (section 4.3), so PAC keeps at least 97.5 % of them,
-and a proposer cannot take more by packing badly, because only the last bundle may be partial. The **work** of assets is
+and a proposer cannot take more by packing badly, because at most one bundle may be partial. The **work** of assets is
 bounded by `MaxAssetTxPerBlock` alone: a bundle does not lower the signatures to verify or the records to write, so that
 number must come from the benchmark and not from the slot arithmetic. A spammer who fills the asset lane (200
 transactions, at least 2 PAC a block in fees) delays other asset users and does not touch PAC. Pools are local policy,
