@@ -31,9 +31,12 @@ An asset may carry an optional **transfer policy**: a team rate and a burn rate,
 applies with a few lines of integer arithmetic. The rates are variable but bounded: each has a minimum and a maximum
 that are fixed at creation, and only the issuer can move a rate between them.
 
-A block may carry at most `MaxAssetTxPerBlock` (100) asset transactions, so assets can never take more than a tenth
-of a block and PAC always keeps the rest. Each asset transaction can carry up to 8 transfers, and the state that an
-asset operation creates is paid for once, in PAC.
+Batching is automatic and happens at two levels. A sender can put up to 8 recipients in one transaction, which costs one
+signature for up to 8 transfers. And the block proposer packs the asset transactions of **any** senders, as they
+arrive, into **bundles** of up to 8: every bundle of a block but at most one is full. Users send ordinary transactions
+and never see a bundle. A bundle takes one slot of the block, so the `MaxAssetTxPerBlock` (200) asset transactions that
+a block may carry use at most 25 of its 1 000 slots, and PAC always keeps the rest. The state that an asset operation
+creates is paid for once, in PAC.
 
 ## Motivation
 
@@ -68,7 +71,8 @@ and a later version may change them ([PIP-51](./pip-51.md)). A change never alte
 
 | Name | Value | Meaning |
 | --- | --- | --- |
-| `MaxAssetTxPerBlock` | 100 | Most asset transactions in one block. 10 % of a 1 000-transaction block |
+| `MaxAssetTxPerBlock` | 200 | Most asset transactions in one block, counted inside the bundles. Bounds the work |
+| `MaxBundleItems` | 8 | Asset transactions in one bundle. Bounds the slots, together with the line above |
 | `MaxRecipients` | 8 | Recipients of one `AssetTransfer`, as `BatchTransfer` |
 | `MaxDecimals` | 9 | Same as PAC |
 | `MaxAssetSupply` | 2^63 - 1 | Largest quantity of any asset, the largest `int64` |
@@ -168,6 +172,8 @@ TypeAssetSetRate  = Type(11)
   balance MUST be rejected before it exceeds `MaxNanoPAC` ([PIP-54](./pip-54.md)).
 * Every asset quantity is an `int64` with `1 <= quantity <= MaxAssetSupply`. A sum of quantities MUST be checked
   before it is added, in the form `total > MaxAssetSupply - amount`.
+* An asset transaction is an ordinary transaction, and it travels through the network and the pools as one. In a block
+  it is carried only inside a bundle (section 4).
 * A recipient is an account address. Treasury and validator addresses are rejected, because nothing could move the
   units from them. The only exception is the zero address as a recipient of `AssetTransfer` (section 3.3).
 * `Check` reads the state and changes nothing. `Execute` applies the whole transaction or none of it.
@@ -305,28 +311,74 @@ again is valid and does nothing.
 An asset whose bounds satisfy `Min == Max` for both rates has fixed rates and can never be changed; its issuer holds no
 authority over them. The bounds are a promise that anyone can read in the state, as `MaxSupply` is.
 
-### 4. Block capacity
+### 4. Bundles and block capacity
 
-A block is invalid if it carries more than `MaxAssetTxPerBlock` transactions whose payload is one of the four types
-above. There is no other rule about order or mix.
+#### 4.1 Bundles
 
-This is the only guarantee that protects PAC, and it is a consensus rule, not a fee market: whatever the demand for
-assets, at least 90 % of a 1 000-transaction block stays available to the other payloads. A proposer SHOULD fill the
-block with the other transactions first and add asset transactions after them. An asset transaction that does not fit
-waits in its pool until its lock time expires, and the signer then signs it again.
+A transaction cannot be extended by anyone but its signer, because its signature covers the whole payload. So the node
+never edits a transaction to add a transfer to it. It packs whole transactions, each with its own signature, into a
+**bundle**: an entry of the list of transactions of a block that holds complete asset transactions and has no sender,
+fee, lock time or signature of its own. These rules are consensus rules:
+
+1. In a block, asset transactions (the four types above) appear only inside bundles, never as entries of the list on
+   their own.
+2. A bundle holds 1 to `MaxBundleItems` asset transactions, and nothing else.
+3. In a block, at most one bundle holds fewer than `MaxBundleItems` items. A proposer with `n` asset transactions to
+   include therefore uses `ceil(n / MaxBundleItems)` slots, and cannot waste slots on half-empty bundles.
+4. A block carries at most `MaxAssetTxPerBlock` asset transactions in all.
+5. A block with a bundle means the same as the block in which the bundle is replaced, in place, by its items in order.
+   Each item is checked and executed as an ordinary transaction at that position: `BasicCheck`, `Check`, `Execute`, its
+   signature, its lock time, the replay check on its own transaction ID, and its fee. An invalid item makes the block
+   invalid.
+6. Items keep their ordinary transaction IDs. The ID of a bundle is
+   `Hash("PAC-ASSET-BUNDLE-1" || ID(item 1) || ... || ID(item n))`, and the transaction root of the block is computed
+   over the entries of its list, using the bundle ID for a bundle. The root therefore commits to the packing, and
+   nobody can repack a block without changing its hash. A proof that an item is in a block is a proof of its bundle
+   and the list of at most 8 IDs.
+
+The wire encoding of a bundle belongs to the reference implementation. It MUST be deterministic and carry only a count
+and the items.
+
+#### 4.2 Packing
+
+The proposer does the packing, and no user does anything. It takes asset transactions from its asset pool in arrival
+order, drops any that no longer pass `Check` against the state of the block under construction, fills bundles of
+`MaxBundleItems`, and stops at `MaxAssetTxPerBlock`. When the first bundle is full it starts a second, and so on; the
+last one may be partial. It SHOULD place bundles after the other transactions. What does not fit stays in the pool for
+the next block, until its lock time expires, and the signer then signs it again.
+
+#### 4.3 Capacity
+
+Two limits bound two different resources.
+
+* **Slots.** A bundle is one entry of the 1 000-transaction list. Whatever the senders, asset transactions take at most
+  `ceil(MaxAssetTxPerBlock / MaxBundleItems)` slots, 25 with the values above, which leaves PAC at least 97.5 % of the
+  slots of a block. Rules 3 and 4 make this a guarantee and not a policy.
+* **Work.** A bundle saves slots and the header of each transaction, not signature checks: every item is verified,
+  executed and written to the state as it would be alone. `MaxAssetTxPerBlock` is what bounds this work and the growth
+  of the state, and it is the number that a benchmark must set (Reference Implementation).
+
+This is a consensus rule and not a fee market: whatever the demand for assets, it cannot take more than these slots
+and this work from a block.
 
 ### 5. Node changes
 
 * `Sandbox` exposes reads and writes of asset records, and the node adds the tree, its store prefix and the extended
   root. `executeBlock` does not change: there is no per-block hook.
-* Block validation counts asset transactions and rejects a block above the cap.
+* Block validation enforces the rules of section 4.1 and computes the transaction root over the entries of the list.
+  The block body gains one kind of entry, the bundle. Store indexes (transaction by ID, replay check) work on the
+  items, so a transaction is found and replay-protected whether or not it sits in a bundle.
+* Block building packs bundles as in section 4.2. The gossip of transactions does not change: nodes relay individual
+  asset transactions, and a bundle exists only inside a block.
 * Transaction pool: a pool is local policy, not consensus. Implementations SHOULD give the four types one pool of
   10 % of `MaxSize`, like `BatchTransfer`, so asset transactions cannot crowd out payments and payments cannot evict
   them. Fee estimation uses the same fixed fee as `Transfer`, plus `Value()`.
 * RPC (mandatory for the official node, on every surface it ships): payload type values `8` to `11` in `PayloadType`;
   `GetRaw*Transaction` builders for the four payloads; `GetAsset`, returning the fields of section 2.1, the policy
   with its current rates and bounds, and the live supply `Issued - Burned`; and `GetAssetBalance(AssetID, Address)`.
-  A node SHOULD also offer a list of the balances of an address from its local index.
+  A node SHOULD also offer a list of the balances of an address from its local index. `GetBlock` and
+  `GetTransaction` return the items of a bundle as ordinary transactions, so a wallet or an explorer does not need to
+  know about bundles; they MAY also report the bundle of each item.
 * Explorers need no new term for supply audits: the charges go to the treasury and every other PAC amount keeps its
   place.
 
@@ -361,16 +413,29 @@ section 4 answers the same worry about L1 capacity with one counter.
 **A cap, not a market.** A fee market needs a price that nobody knows before the layer is used. A cap on the number
 of asset transactions in a block needs no guess, is trivial to validate and gives PAC a floor that no demand can
 lower. Its price is that asset users can be delayed when asset demand reaches the cap. That is acceptable, and the
-cap is one constant that a later version can raise.
+cap is one constant that a later version can raise. With bundles the cap counts the transactions that carry work, and
+the slots follow from it.
 
 **One record for every kind of asset.** A token-ID dimension (items inside a collection) needs item records, per-item
 supply and more rules for each type. Here an NFT is an asset with a supply of one. The cost is that a collection of N
 items is N creations, each priced by the fee and `RecordCharge` and paced by the cap. A later PIP can add collections if
 there is demand, without changing these records.
 
-**Batching inside `AssetTransfer`.** `BatchTransfer` already shows that up to 8 recipients are a safe size. One
-transaction then moves up to 8 transfers, so the cap limits transactions while the layer still serves many users.
-The single-recipient transfer is the case of one.
+**Two levels of batching.** `BatchTransfer` already shows that up to 8 recipients are a safe size. Inside
+`AssetTransfer`, one signature then moves up to 8 transfers, which is the only batching that really lowers the work,
+since it saves signatures. The single-recipient transfer is the case of one. Above it, bundles let the proposer put
+transactions of different senders into one slot, so that the slots of a block are not the limit of asset traffic.
+
+**The node packs whole transactions.** A node cannot add a recipient to a transaction that someone else signed, and
+account signatures do not merge: BLS aggregation exists only for BLS accounts and, for different messages, still costs
+one pairing per message. So the bundle holds complete signed transactions and nothing new is trusted: each item is
+checked as it would be alone, and a bundle is a compression of the list of transactions. Packing is mandatory and
+full, so that a proposer cannot use half-empty bundles to take slots from PAC. The cost is a new kind of entry in the
+block body, which is the most delicate part of this PIP for the node authors.
+
+**What a bundle does not save.** Bundles do not reduce signature checks, state writes or, by more than the header of
+each transaction, bytes. They free slots. The honest bound on the work of assets is therefore `MaxAssetTxPerBlock`, set
+by a benchmark, and not the number of slots.
 
 **Burn is a transfer.** It saves a payload type, a pool and an RPC builder, and the semantics are unambiguous. The
 cost is that a transfer to the zero address by mistake cannot be undone, which wallets guard against.
@@ -418,7 +483,12 @@ the record of the collector is appended at creation for that reason. A transfer 
 6. **Fees in the assets themselves.** No common unit, and no way for a new holder to pay a first fee. The rates of
    section 3.3 are not fees of this kind: they are a property of the asset that its issuer chose, and they do not pay
    for the transaction.
-7. **Rates that are fixed, or that have no bounds.** Fixed rates are possible (`Min == Max`) but not the only choice.
+7. **The node merges transfers of different senders into one transaction with many senders.** Not possible with
+   account signatures, which cover one payload each. Bundles keep the signatures and merge only the slot.
+8. **Asset transactions flat in the block, with a cap on their number.** Simpler for the block body, but each one
+   takes a slot, so 200 of them would take a fifth of a block, and the cap would have to be small. A version can
+   still set `MaxBundleItems` to 1 to get one slot per transaction.
+9. **Rates that are fixed, or that have no bounds.** Fixed rates are possible (`Min == Max`) but not the only choice.
    Unbounded rates would let an issuer take any share of any transfer.
 
 ## Backwards Compatibility
@@ -428,9 +498,11 @@ the extended state root. Existing payload types, account records and validator r
 that never use the feature are unaffected.
 
 Activation follows [PIP-51](./pip-51.md): implementations advertise version `V`; when more than 75 % of committee power
-supports it, proposers raise the block version; from the first block of version `V` the extended root applies and
-the four types are legal. Before that block they MUST be rejected as invalid payload types, and the asset tree does
-not exist. State sync and snapshots MUST carry the asset tree from then on. Testnet SHOULD activate first.
+supports it, proposers raise the block version; from the first block of version `V` the extended root applies, the
+four types are legal and a block body may carry bundles, with its transaction root computed over the entries of its
+list. Before that block they MUST be rejected as invalid payload types, a bundle is an invalid entry, and the asset
+tree does not exist. Software that reads block bodies (explorers, indexers, light clients) must learn the bundle. State
+sync and snapshots MUST carry the asset tree from then on. Testnet SHOULD activate first.
 
 ## Test Cases
 
@@ -462,8 +534,15 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   value. Bounds, cap and collector never change.
 * **Mint.** Only the issuer mints. A mint above `MaxSupply - Issued` fails. After a burn, a mint still cannot pass
   `MaxSupply` in total. An asset with `MaxSupply == InitialSupply` rejects every mint.
-* **Block capacity.** A block with 100 asset transactions and 900 other transactions is valid; one with 101 asset
-  transactions is invalid.
+* **Bundles.** A block with 200 asset transactions in 25 full bundles and 975 other transactions is valid; 201 asset
+  transactions are invalid. A block with 17 asset transactions in a bundle of 8, a bundle of 8 and a bundle of 1 is
+  valid, and the same 17 in a bundle of 8, a bundle of 5 and a bundle of 4 is invalid (two partial bundles). Invalid: an
+  empty bundle, a bundle of 9, an asset transaction outside any bundle, a bundle that holds a `Transfer` or another
+  bundle, and a bundle in a block below `V`. An item with a bad signature, an expired lock time, an ID that was already
+  executed or a balance that is too small makes the block invalid. Two items of one sender in one bundle run in order.
+  The state root after a block with bundles equals the one after the same block with the bundles replaced by their
+  items. Repacking the same items gives a different bundle ID and a different transaction root. A transaction is found
+  by `GetTransaction` with its own ID, and a transaction ID that is already in a bundle is rejected a second time.
 * **Invariants.** The invariants of section 2.3 hold after every test. Balances, stake and treasury sum to the PAC
   supply after every test: asset transactions only move PAC to the treasury and pay the fee.
 * **Determinism.** Two nodes with different local indexes and one restarted from a pruned store obtain the same root
@@ -472,15 +551,19 @@ Implementations MUST pass at least these. They add no rule to the Specification.
 ## Reference Implementation
 
 None yet. Before this PIP leaves Draft, a pull request will add the four payloads, the asset tree, the extended root,
-the block cap and the RPC to the Pactus node, and report on stated hardware: the time to validate a block with 100
-asset transactions of 8 recipients, the cost of a tree update, the size of the store per record, and the effect on
+the bundles, the block cap and the RPC to the Pactus node, and report on stated hardware: the time to validate a block
+with `MaxAssetTxPerBlock` asset transactions of 8 recipients each, for BLS, Ed25519 and secp256k1 senders, which is
+what sets the cap; the cost of a tree update, the size of the store per record, and the effect on
 state sync.
 
 ### Open items of this draft
 
 * **A reference implementation.** No part of this PIP has run inside a Pactus node.
 * **Byte-level vectors** for each payload and for the extended root.
-* **Constants.** Every value of section 1 is an initial proposal, not measured.
+* **The bundle in the block body.** Its wire encoding and the transaction root over the entries of the list are the
+  least settled part of this PIP and need the review of the node authors.
+* **Constants.** Every value of section 1 is an initial proposal, not measured. `MaxAssetTxPerBlock` is set by the
+  benchmark of the Reference Implementation.
 
 ## Security Considerations
 
@@ -494,8 +577,8 @@ The same care applies to PAC: `Value() + fee` and every balance are bounded by `
 ### State growth
 
 Records are never removed, as for accounts, so a record is paid for once, by `RecordCharge` and the fee. In the
-worst case, a sender who fills the cap for ever with 8 new recipients per transaction creates 800 holdings of 34 bytes
-per block, about 6.9 million a day and 235 MB of records, and pays about 15 600 PAC a day in charges and fees. Today a
+worst case, a sender who fills the cap for ever with 8 new recipients per transaction creates 1 600 holdings of 34 bytes
+per block, about 13.8 million a day and 470 MB of records, and pays about 31 100 PAC a day in charges and fees. Today a
 sender can create up to 8 000 accounts per 1 000-transaction block with `BatchTransfer`, so the bound is lower than the
 one Pactus already accepts for accounts, at a comparable price per record. Creating an asset adds one asset record of
 at most 134 bytes, and costs the fee plus 2 or 3 `RecordCharge`, so asset spam is cheaper per record than holding spam
@@ -504,10 +587,14 @@ of empty holdings, with a deposit, is left for a later PIP.
 
 ### Block capacity
 
-The cap guarantees PAC at least 90 % of a block, and the proposer's order lets PAC take the rest when it needs it. A
-spammer who fills the asset lane (100 transactions, at least 1 PAC a block in fees) delays other asset users and does
-not touch PAC. Pools are local policy, and the 10 % pool keeps asset transactions from filling the memory of a node
-at the expense of payments.
+The bundle rules keep assets to at most 25 slots of a block (section 4.3), so PAC keeps at least 97.5 % of them,
+and a proposer cannot take more by packing badly, because only the last bundle may be partial. The **work** of assets is
+bounded by `MaxAssetTxPerBlock` alone: a bundle does not lower the signatures to verify or the records to write, so that
+number must come from the benchmark and not from the slot arithmetic. A spammer who fills the asset lane (200
+transactions, at least 2 PAC a block in fees) delays other asset users and does not touch PAC. Pools are local policy,
+and the 10 % pool keeps asset transactions from filling the memory of a node at the expense of payments. The ID of a
+bundle commits to its packing, so a relay cannot repack the body of a block without changing its hash, and a block
+whose packing breaks section 4.1 is invalid even if every item is valid.
 
 ### The issuer
 
