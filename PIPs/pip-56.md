@@ -111,7 +111,7 @@ If `PolicyPresent` is `1`, the record continues with the transfer policy:
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `Collector` | `Address` | An account address that receives the team share. Fixed at creation. Must accept the asset |
+| `Collector` | `Address` | An account address that receives the team share. Fixed at creation. Must accept the asset before any transfer, while `TeamRate.Current` is above 0 |
 | `TeamRate` | 3 x `uint16` | `Current`, `Min`, `Max`, in basis points. `Min` and `Max` are fixed at creation |
 | `BurnRate` | 3 x `uint16` | `Current`, `Min`, `Max`, in basis points. `Min` and `Max` are fixed at creation |
 | `TeamCap` | `int64` | Largest team share of one transfer entry. `MaxAssetSupply` means no cap. Fixed at creation |
@@ -215,8 +215,9 @@ records.
 `Issued = InitialSupply`, `Burned = 0` and the policy as given; if the record of the creator is appended, append a
 `HoldingRecord` of `From` with `Balance = InitialSupply`. No record is appended for any other account, the collector
 included: the collector is named by the creator but has not signed, so it must accept the asset itself (section 3.7).
-Until it has, no `AssetTransfer` of this asset is valid (section 3.3). A creator with `InitialSupply == 0` that is not
-the collector holds no record yet: to mint to itself, it accepts the asset like anyone else.
+Until it has, no `AssetTransfer` of this asset is valid as long as `TeamRate.Current` is above 0 (section 3.3). A
+creator with `InitialSupply == 0` that is not the collector holds no record yet: to mint to itself, it accepts the asset
+like anyone else.
 
 The asset is **minting** if `MaxSupply > InitialSupply`. If they are equal, nobody can ever create another unit and
 nobody holds any authority over its supply: the supply is fixed for ever. Symbols are labels, not names: they are not
@@ -254,15 +255,16 @@ rate: the whole `Amount` is burned.
 `BasicCheck`: `MaxRate <= 10 000`; the number of recipients is in range; no `To` appears twice; no `To` equals `From`;
 every amount is in range; the sum of the amounts, checked as in section 3.1, does not exceed `MaxAssetSupply`.
 `Check`: the asset exists; `TeamRate.Current + BurnRate.Current <= MaxRate` (both are 0 without a policy); if the asset
-has a policy, `Collector` has a holding of the asset, that is, it has accepted it; `From` has a holding with
-`Balance >= total`; every `To` that is not the zero address has a holding of the asset; `Balance >= fee` in PAC; no
-entry to an account has `net == 0`.
+has a policy and `TeamRate.Current` is above 0, `Collector` has a holding of the asset, that is, it has accepted it;
+`From` has a holding with `Balance >= total`; every `To` that is not the zero address has a holding of the asset;
+`Balance >= fee` in PAC; no entry to an account has `net == 0`. When `TeamRate.Current` is 0, no team share is due and
+the collector is not involved.
 
 `Execute`: debit the fee in PAC; subtract `total` from the holding of `From` (the holding stays, even at zero); then,
 for each recipient in the order of the list: if `To` is the zero address, add `Amount` to the `Burned` of the asset;
 otherwise add `net` to the holding of `To`, add `team` to the holding of `Collector` if `team > 0`, and add `burn` to
-`Burned`. The holding of `Collector` exists, by `Check`. Each addition applies to the live record, so the result is
-the same when addresses coincide. No record is appended.
+`Burned`. If `team > 0` then `TeamRate.Current` is above 0, so the holding of `Collector` exists, by `Check`. Each
+addition applies to the live record, so the result is the same when addresses coincide. No record is appended.
 
 For example, with `Amount = 1 000 000`, `TeamRate = 200` (2 %), `BurnRate = 50` (0.5 %) and `TeamCap = 15 000`:
 `share(Amount, 200) = 20 000`, so `team = 15 000`; `burn = 5 000`; `net = 980 000`. With `Amount = 99` and the same
@@ -333,6 +335,10 @@ again is valid and does nothing.
 An asset whose bounds satisfy `Min == Max` for both rates has fixed rates and can never be changed; its issuer holds no
 authority over them. The bounds are a promise that anyone can read in the state, as `MaxSupply` is.
 
+This is also the way out when the collector of an asset cannot or does not accept it: if `TeamRate.Min` is 0, the
+issuer sets `TeamRate` to 0, no team share is due, and transfers are valid again without the collector (section 3.3).
+If `TeamRate.Min` is above 0 there is no way out but the acceptance of the collector.
+
 #### 3.7 `AssetAccept` (type 12)
 
 | Field | Type | Notes |
@@ -350,11 +356,11 @@ account that does not want an asset simply never accepts it, and an account that
 empty record that costs it nothing more. Accepting twice is rejected, so nobody pays twice for the same record.
 
 A sender cannot open a record for someone else, and cannot pay for it either. This has no exception: the collector that
-a policy names accepts like anyone else, and while it has not, no transfer of the asset is valid. Only the issuer who
-named it is affected, so an account that is named as a collector against its will is not harmed and is not obliged to
-do anything. An issuer that wants to distribute an asset publishes the `AssetID`, lets the recipients accept, and then
-sends the units, in one batch of up to 8 per transaction. A wallet that wants to receive an asset asks its user, then
-signs an `AssetAccept`.
+a policy names accepts like anyone else, and while it has not, no transfer of the asset is valid as long as the team
+rate is above 0. Only the issuer who named it is affected, so an account that is named as a collector against its will
+is not harmed and is not obliged to do anything. An issuer that wants to distribute an asset publishes the `AssetID`,
+lets the recipients accept, and then sends the units, in one batch of up to 8 per transaction. A wallet that wants to
+receive an asset asks its user, then signs an `AssetAccept`.
 
 ### 4. Bundles and block capacity
 
@@ -418,12 +424,13 @@ and this work from a block.
 * Transaction pool: a pool is local policy, not consensus. Implementations SHOULD give the five types one pool of
   10 % of `MaxSize`, like `BatchTransfer`, so asset transactions cannot crowd out payments and payments cannot evict
   them. Fee estimation uses the same fixed fee as `Transfer`, plus `Value()`. A pool MAY drop an `AssetTransfer` or
-  `AssetMint` whose recipient has not accepted the asset, and an `AssetTransfer` of an asset whose collector has not,
-  since neither can be valid until an `AssetAccept` lands.
+  `AssetMint` whose recipient has not accepted the asset, and an `AssetTransfer` of an asset whose team rate is above 0
+  and whose collector has not accepted it, since neither can be valid until an `AssetAccept` or an `AssetSetRate`
+  lands.
 * RPC (mandatory for the official node, on every surface it ships): payload type values `8` to `12` in `PayloadType`;
   `GetRaw*Transaction` builders for the five payloads; `GetAsset`, returning the fields of section 2.1, the policy
-  with its current rates and bounds and whether its collector has accepted it (an asset with a policy cannot be
-  transferred before), and the live supply `Issued - Burned`; and `GetAssetBalance(AssetID, Address)`,
+  with its current rates and bounds and whether its collector has accepted it (an asset whose team rate is above 0
+  cannot be transferred before), and the live supply `Issued - Burned`; and `GetAssetBalance(AssetID, Address)`,
   which tells an account that has not accepted the asset from one that holds a balance of 0, so that a sender can check
   before it signs. A node SHOULD also offer a list of the balances of an address from its local index. `GetBlock` and
   `GetTransaction` return the items of a bundle as ordinary transactions, so a wallet or an explorer does not need to
@@ -450,8 +457,8 @@ Nothing here is checked by consensus. Wallets and explorers agree on it so that 
   rates, not only their current values. A royalty or a tax on units of an asset, paid to a collector, is expressed with
   `TeamRate`; a deflationary asset is expressed with `BurnRate`. Rates are meant for fungible assets: on an asset of
   supply 1 every share rounds to 0. An issuer that wants its team share paid to another account names that account as
-  `Collector` and makes it accept the asset before the first transfer, or names itself, which needs no extra step, and
-  forwards the share when it wants.
+  `Collector` and makes it accept the asset before the first transfer (unless the team rate starts at 0), or names
+  itself, which needs no extra step, and forwards the share when it wants.
 * Receiving an asset takes two steps: the recipient accepts, then the sender sends. A wallet asks its user before it
   signs an `AssetAccept`, and MAY offer the acceptance as a link or a QR code that carries the `AssetID`. A distribution
   to many accounts is a claim: the issuer publishes the `AssetID`, accounts accept, and the issuer sends to those that
@@ -526,8 +533,10 @@ receive an asset, and a recipient that needs a little PAC before it can accept. 
 XRP Ledger, Stellar and Algorand also ask the receiver to opt in. There is no exception: the creator's own record is
 appended by the creation it signed, and the collector named by a policy must accept like anyone else. An earlier
 version of this PIP created the collector's record at creation, which let an issuer put an asset on any account by
-naming it; now a transfer of an asset with a policy is invalid until the collector accepts, which costs nobody but the
-issuer that named it.
+naming it; now a transfer of an asset whose team rate is above 0 is invalid until the collector accepts, which costs
+nobody but the issuer that named it. The condition is on the rate and not on the existence of a policy so that the
+issuer has a way out: with `TeamRate.Min` at 0, setting the rate to 0 removes the team share, and with it the need for a
+collector that may never accept.
 
 **Charges known from the payload.** `Value()` is computed from the payload alone, so a wallet never has to guess a fee
 from the state, and no fee code depends on the state. Because only creation and acceptance append records, and which
@@ -601,9 +610,11 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   block invalid. A collector other than the creator that accepts makes transfers of the asset valid.
 * **Transfer.** One recipient and eight succeed; nine fail. Rejected: a repeated `To`, `To == From`, a validator
   recipient, an amount of 0 or below, a `MaxRate` above 10 000, an unknown asset, a balance that is too small, a
-  recipient that has not accepted the asset, an asset with a policy whose collector has not accepted it (even for a
-  transfer made only of burns), and 8 recipients of `2^62` each (the overflow case of PIP-54), which fails before
-  any addition. A transfer to the zero address needs no holding, raises `Burned` and creates no record.
+  recipient that has not accepted the asset, an asset whose `TeamRate.Current` is above 0 and whose collector has
+  not accepted it (even for a transfer made only of burns), and 8 recipients of `2^62` each (the overflow case of
+  PIP-54), which fails before any addition. The same asset with `TeamRate.Current` at 0 accepts transfers although
+  the collector has not accepted, and no team share is paid. A transfer to the zero address needs no holding, raises
+  `Burned` and creates no record.
   A holding that reaches zero stays. `Value()` is 0, and the number of records of the tree is the same before and
   after any transfer.
 * **Rates.** The example of section 3.3 gives `team = 15 000`, `burn = 5 000` and `net = 980 000`. With the same rates,
@@ -615,7 +626,9 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   collector and `Burned` change as specified when the collector is the recipient or the sender.
 * **Set rate.** The issuer sets a rate inside its bounds and the next transfer uses it. A value outside `[Min, Max]`, a
   non-issuer, an asset without a policy and an unknown asset fail. An asset with `Min == Max` accepts only that
-  value. Bounds, cap and collector never change.
+  value. Bounds, cap and collector never change. With a collector that has not accepted and `TeamRate.Min` at 0,
+  setting `TeamRate` to 0 makes transfers valid again, and setting it back above 0 makes them invalid again until the
+  collector accepts. With `TeamRate.Min` above 0, only the acceptance of the collector makes them valid.
 * **Mint.** Only the issuer mints. A mint above `MaxSupply - Issued` fails. After a burn, a mint still cannot pass
   `MaxSupply` in total. An asset with `MaxSupply == InitialSupply` rejects every mint. A mint to an account that has not
   accepted the asset fails, including a mint by an issuer to itself when `InitialSupply` was 0 and it holds no record.
@@ -708,10 +721,14 @@ apply to a mint or to a burn. A later PIP for exchanges MUST say how an atomic s
 that it moves.
 
 An issuer that names a collector that cannot accept, for instance a mistyped address, makes the asset untransferable for
-every holder, burns included, until that collector accepts, and the collector of an asset can never be changed. A wallet
-MUST have the issuer confirm the collector address before it signs an `AssetCreate` with a policy, and SHOULD show an
-asset whose collector has not accepted as not yet transferable. The check costs the issuer one `AssetAccept` from the
-collector, or none if it names itself.
+every holder, burns included, as long as `TeamRate.Current` is above 0 and that collector has not accepted, and the
+collector of an asset can never be changed. If `TeamRate.Min` is 0, the issuer releases the asset by setting the team
+rate to 0, at the price of the team share. If `TeamRate.Min` is above 0, nothing releases it but the collector's
+acceptance, so such an asset with a collector other than the issuer has no way out if the address is wrong. A wallet
+MUST have the issuer confirm the collector address before it signs an `AssetCreate` with a policy, SHOULD warn when
+`TeamRate.Min` is above 0 and the collector is not the issuer, and SHOULD show an asset whose collector has not
+accepted as not yet transferable. The check costs the issuer one `AssetAccept` from the collector, or none if it names
+itself.
 
 ### Identity and spoofing
 
