@@ -13,7 +13,7 @@ requires: 39, 51, 54
 
 ## Abstract
 
-This PIP adds native assets to Pactus with four payloads, one new state tree, and nothing else: no virtual machine,
+This PIP adds native assets to Pactus with five payloads, one new state tree, and nothing else: no virtual machine,
 no committee, no new cryptography. An asset is a record with a symbol, a number of decimals, a capped supply and a
 metadata hash. Balances are kept per account. Assets are signed, paid and replay-protected like every other Pactus
 transaction, with the same accounts and keys.
@@ -21,11 +21,17 @@ transaction, with the same accounts and keys.
 | Payload | Does |
 | --- | --- |
 | `AssetCreate` | Creates an asset and credits its initial supply to the creator |
+| `AssetAccept` | Opts the signer in to an asset. Nobody can receive units of an asset before accepting it |
 | `AssetTransfer` | Moves units to 1 to 8 recipients. A transfer to the zero address burns them |
 | `AssetMint` | Lets the issuer create more units, up to the `MaxSupply` fixed at creation |
 | `AssetSetRate` | Lets the issuer move the transfer rates of an asset, inside the bounds fixed at creation |
 
 Fungible tokens, NFTs and semi-fungible tokens are the same record with different parameters, not different types.
+
+**Nobody can be given an asset against their will.** An account holds an asset only after it has accepted it with its
+own signature and paid for its own record. Transfers and mints never add a record to the state: they only change a
+balance that its owner opened. This is what stops unsolicited airdrops, and it makes the growth of the state the
+business of whoever causes it.
 
 An asset may carry an optional **transfer policy**: a team rate and a burn rate, in basis points, that every transfer
 applies with a few lines of integer arithmetic. The rates are variable but bounded: each has a minimum and a maximum
@@ -46,15 +52,15 @@ every balance for ever.
 
 This PIP keeps the design as small as the problem allows, in the spirit of Pactus: robust, reliable and light.
 
-* **Robust.** Four payloads and one rule per payload. Every amount is bounded and every sum checked before it is
+* **Robust.** Five payloads and one rule per payload. Every amount is bounded and every sum checked before it is
   added ([PIP-54](./pip-54.md)). The only authority an asset can have is a mint capped at creation.
 * **Reliable.** Assets carry exactly the trust of PAC: the validators check every rule, and nobody else is trusted.
   Nothing depends on an operator, an indexer or an off-chain data store.
 * **Light.** No per-block hook, no signature scheme, no epoch, no registry. The load that assets put on L1 is bounded
   by a constant, not by a market.
 
-The commands are few: create, transfer, mint, and set a rate. Exchanges, allowances, lending, oracles, governance,
-freezing, clawback and metadata updates are outside this PIP.
+The commands are few: create, accept, transfer, mint, and set a rate. Exchanges, allowances, lending, oracles,
+governance, freezing, clawback and metadata updates are outside this PIP.
 
 ## Specification
 
@@ -76,7 +82,7 @@ and a later version may change them ([PIP-51](./pip-51.md)). A change never alte
 | `MaxRecipients` | 8 | Recipients of one `AssetTransfer`, as `BatchTransfer` |
 | `MaxDecimals` | 9 | Same as PAC |
 | `MaxAssetSupply` | 2^63 - 1 | Largest quantity of any asset, the largest `int64` |
-| `RecordCharge` | 0.001 PAC | Paid to the treasury for each record that a payload can append (section 3.5) |
+| `RecordCharge` | 0.001 PAC | Paid to the treasury for each record that `AssetCreate` or `AssetAccept` appends (section 3.5) |
 
 ### 2. State
 
@@ -123,9 +129,10 @@ behaves as if both rates were 0.
 | `Balance` | `int64` | Units held, `0 <= Balance <= MaxSupply` of the asset. May be zero |
 
 The `AssetID` of an asset is the index of its `AssetRecord`. A record is hashed over its encoding, `Hash(Bytes)`.
-There is at most one `HoldingRecord` for a given `(AssetID, Owner)`, and it is created the first time the owner
-receives units. A node keeps a local index from `(AssetID, Owner)` to the record index. The index is not consensus
-state and can be rebuilt from the tree.
+There is at most one `HoldingRecord` for a given `(AssetID, Owner)`. Only `AssetCreate` (for the creator and for the
+collector) and `AssetAccept` (for its signer) append one. `AssetTransfer` and `AssetMint` never append a record: they
+need the recipient's record to exist. A node keeps a local index from `(AssetID, Owner)` to the record index. The index
+is not consensus state and can be rebuilt from the tree.
 
 #### 2.2 State root
 
@@ -146,11 +153,13 @@ After every transaction, for every asset:
 
 * `0 <= Burned <= Issued <= MaxSupply <= MaxAssetSupply`;
 * the sum of its holdings equals `Issued - Burned`;
-* `Issued` and `Burned` never decrease.
+* `Issued` and `Burned` never decrease;
+* a holding is appended only by `AssetCreate` and `AssetAccept`, so a transfer or a mint never changes the number of
+  records of the tree.
 
 ### 3. Payloads
 
-Four payload types are added. They take the next free numbers, 8 to 11, on the assumption that
+Five payload types are added. They take the next free numbers, 8 to 12, on the assumption that
 [PIP-50](./pip-50.md) uses type 7; other Drafts also add payload types, so the editors renumber when assigning. No
 test of this PIP depends on a type number.
 
@@ -159,9 +168,10 @@ TypeAssetCreate   = Type(8)
 TypeAssetTransfer = Type(9)
 TypeAssetMint     = Type(10)
 TypeAssetSetRate  = Type(11)
+TypeAssetAccept   = Type(12)
 ```
 
-#### 3.1 Rules common to all four
+#### 3.1 Rules common to all five
 
 * `Signer()` is `From`. Only **account addresses** (BLS, Ed25519, secp256k1) are valid. Treasury and validator
   addresses MUST be rejected as `From`.
@@ -175,7 +185,9 @@ TypeAssetSetRate  = Type(11)
 * An asset transaction is an ordinary transaction, and it travels through the network and the pools as one. In a block
   it is carried only inside a bundle (section 4).
 * A recipient is an account address. Treasury and validator addresses are rejected, because nothing could move the
-  units from them. The only exception is the zero address as a recipient of `AssetTransfer` (section 3.3).
+  units from them. The only exception is the zero address as a recipient of `AssetTransfer` (section 3.3). Any other
+  recipient MUST already hold a `HoldingRecord` of the asset, possibly with a balance of 0: it MUST have accepted the
+  asset (section 3.7).
 * `Check` reads the state and changes nothing. `Execute` applies the whole transaction or none of it.
 
 #### 3.2 `AssetCreate` (type 8)
@@ -199,8 +211,9 @@ one `Max` is above 0; `1 <= TeamCap <= MaxAssetSupply`. `Check`: `Balance >= Val
 `Execute`: debit `Value + fee` and credit `Value` to the treasury; append an `AssetRecord` with `Issuer = From`,
 `Issued = InitialSupply`, `Burned = 0` and the policy as given; if `InitialSupply > 0`, append a `HoldingRecord` of
 `From` for it; if the policy is present and `Collector` has no holding of the asset yet, append a `HoldingRecord` of
-`Collector` with `Balance = 0`. A transfer then never has to create the collector's record, which keeps its charge
-a function of the payload (section 3.5).
+`Collector` with `Balance = 0`. The collector cannot accept the asset before it exists, and transfers never append a
+record, so its record is created here. A creator with `InitialSupply == 0` that is not also the collector holds no
+record yet: to mint to itself, it accepts the asset like anyone else.
 
 The asset is **minting** if `MaxSupply > InitialSupply`. If they are equal, nobody can ever create another unit and
 nobody holds any authority over the asset: the supply is fixed for ever. Symbols are labels, not names: they are not
@@ -217,7 +230,7 @@ unique, and the `AssetID` is the identity.
 | `Recipients[].To` | `Address` | An account address, or the zero address to burn |
 | `Recipients[].Amount` | *varint* `int64` | The gross quantity taken from the sender |
 
-`R` is the number of recipients that are not the zero address.
+`Value()` is 0: a transfer appends no record, so it pays only the fixed fee.
 
 **Rates.** With a policy, each entry whose `To` is not the zero address is split as follows, with `D = 10 000`, the
 current rates of the asset, and integer division throughout:
@@ -238,14 +251,14 @@ rate: the whole `Amount` is burned.
 `BasicCheck`: the number of recipients is in range; no `To` appears twice; no `To` equals `From`; every amount is in
 range; the sum of the amounts, checked as in section 3.1, does not exceed `MaxAssetSupply`.
 `Check`: the asset exists; `TeamRate.Current + BurnRate.Current <= MaxRate` (both are 0 without a policy); `From` has a
-holding with `Balance >= total`; `Balance >= Value + fee` in PAC; no entry to an account has `net == 0`.
+holding with `Balance >= total`; every `To` that is not the zero address has a holding of the asset; `Balance >= fee`
+in PAC; no entry to an account has `net == 0`.
 
-`Execute`: debit `Value + fee` in PAC and credit `Value` to the treasury; subtract `total` from the holding of `From`
-(the holding stays, even at zero); then, for each recipient in the order of the list: if `To` is the zero address, add
-`Amount` to the `Burned` of the asset; otherwise add `net` to the holding of `To`, appending a new `HoldingRecord`
-first if there is none, add `team` to the holding of `Collector` if `team > 0`, and add `burn` to `Burned`. The holding
-of `Collector` already exists (section 3.2). Each addition applies to the live record, so the result is the same when
-addresses coincide, and the order makes the index of new records the same on every node.
+`Execute`: debit the fee in PAC; subtract `total` from the holding of `From` (the holding stays, even at zero); then,
+for each recipient in the order of the list: if `To` is the zero address, add `Amount` to the `Burned` of the asset;
+otherwise add `net` to the holding of `To`, add `team` to the holding of `Collector` if `team > 0`, and add `burn` to
+`Burned`. The holding of `Collector` already exists (section 3.2). Each addition applies to the live record, so the
+result is the same when addresses coincide. No record is appended.
 
 For example, with `Amount = 1 000 000`, `TeamRate = 200` (2 %), `BurnRate = 50` (0.5 %) and `TeamCap = 15 000`:
 `share(Amount, 200) = 20 000`, so `team = 15 000`; `burn = 5 000`; `net = 980 000`. With `Amount = 99` and the same
@@ -268,10 +281,9 @@ supply, and `Issued` is not lowered, so burning never makes room for a new mint.
 | `To` | `Address` | An account address. Not the zero address |
 | `Amount` | *varint* `int64` | |
 
-`R` is 1. `Check`: the asset exists; `From == Issuer`; `Amount <= MaxSupply - Issued`; `Balance >= Value + fee`.
-`Execute`: debit `Value + fee` and credit `Value` to the treasury; add `Amount` to `Issued`; add `Amount` to the
-holding of `To`, appending a `HoldingRecord` first if there is none. A mint pays no transfer rate: it creates units,
-it does not move them.
+`Value()` is 0. `Check`: the asset exists; `From == Issuer`; `To` has a holding of the asset; `Amount <= MaxSupply -
+Issued`; `Balance >= fee`. `Execute`: debit the fee; add `Amount` to `Issued`; add `Amount` to the holding of `To`. No
+record is appended. A mint pays no transfer rate: it creates units, it does not move them.
 
 The cap is on units ever issued, not on units alive. A holder can therefore read `MaxSupply` and know the largest
 quantity that will ever exist. An asset with `MaxSupply == InitialSupply` rejects every mint.
@@ -280,18 +292,21 @@ quantity that will ever exist. An asset with `MaxSupply == InitialSupply` reject
 
 `RecordCharge` pays for state that every node keeps for ever. Every payload has `Value() = RecordCharge * R`, where `R`
 is the number of records the payload can append, **counted from the payload alone**: a wallet knows the charge before
-it signs, and no charge depends on whether a balance entry already exists.
+it signs, and no charge depends on the state.
 
 | Payload | `R` |
 | --- | --- |
 | `AssetCreate` | 1, plus 1 if `InitialSupply > 0`, plus 1 if `PolicyPresent` is `1` |
-| `AssetTransfer` | The number of recipients that are not the zero address |
-| `AssetMint` | 1 |
-| `AssetSetRate` | 0, so `Value()` is 0 and only the fixed fee is paid |
+| `AssetAccept` | 1 |
+| `AssetTransfer` | 0 |
+| `AssetMint` | 0 |
+| `AssetSetRate` | 0 |
 
-The charge is paid whether or not a record is in fact appended, so a transfer to an existing holder pays for a record
-it did not need. The charge is credited to the treasury, and the fixed fee follows its existing path. The rates of
-section 3.3 are a different thing: they are quantities of the asset, set by its issuer, and PAC is not involved.
+Only creation and acceptance append records, so only they pay a charge, and the account that causes a record is the
+account that pays for it. A creator that is also the collector, or whose `InitialSupply` is 0, pays for a record that
+is not appended; that is cheaper than a charge that depends on the state. The charge is credited to the treasury, and
+the fixed fee follows its existing path. The rates of section 3.3 are a different thing: they are quantities of the
+asset, set by its issuer, and PAC is not involved.
 
 #### 3.6 `AssetSetRate` (type 11)
 
@@ -311,6 +326,26 @@ again is valid and does nothing.
 An asset whose bounds satisfy `Min == Max` for both rates has fixed rates and can never be changed; its issuer holds no
 authority over them. The bounds are a promise that anyone can read in the state, as `MaxSupply` is.
 
+#### 3.7 `AssetAccept` (type 12)
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `From` | `Address` | The account that opts in. An account address |
+| `AssetID` | `uint32` | |
+
+`Value()` is `RecordCharge`. `Check`: the asset exists; `From` has no holding of the asset yet;
+`Balance >= Value + fee`. `Execute`: debit `Value + fee` and credit `Value` to the treasury; append a `HoldingRecord`
+of `From` for the asset with `Balance = 0`.
+
+Only the account itself can accept, because only its signature is valid. From then on it can receive transfers and
+mints of the asset. There is no way to refuse a transfer once the record exists, and none to remove the record: an
+account that does not want an asset simply never accepts it, and an account that accepted one by mistake keeps an
+empty record that costs it nothing more. Accepting twice is rejected, so nobody pays twice for the same record.
+
+A sender cannot open a record for someone else, and cannot pay for it either. An issuer that wants to distribute an
+asset publishes the `AssetID`, lets the recipients accept, and then sends the units, in one batch of up to 8 per
+transaction. A wallet that wants to receive an asset asks its user, then signs an `AssetAccept`.
+
 ### 4. Bundles and block capacity
 
 #### 4.1 Bundles
@@ -320,7 +355,7 @@ never edits a transaction to add a transfer to it. It packs whole transactions, 
 **bundle**: an entry of the list of transactions of a block that holds complete asset transactions and has no sender,
 fee, lock time or signature of its own. These rules are consensus rules:
 
-1. In a block, asset transactions (the four types above) appear only inside bundles, never as entries of the list on
+1. In a block, asset transactions (the five types above) appear only inside bundles, never as entries of the list on
    their own.
 2. A bundle holds 1 to `MaxBundleItems` asset transactions, and nothing else.
 3. In a block, at most one bundle holds fewer than `MaxBundleItems` items. A proposer with `n` asset transactions to
@@ -370,13 +405,15 @@ and this work from a block.
   items, so a transaction is found and replay-protected whether or not it sits in a bundle.
 * Block building packs bundles as in section 4.2. The gossip of transactions does not change: nodes relay individual
   asset transactions, and a bundle exists only inside a block.
-* Transaction pool: a pool is local policy, not consensus. Implementations SHOULD give the four types one pool of
+* Transaction pool: a pool is local policy, not consensus. Implementations SHOULD give the five types one pool of
   10 % of `MaxSize`, like `BatchTransfer`, so asset transactions cannot crowd out payments and payments cannot evict
-  them. Fee estimation uses the same fixed fee as `Transfer`, plus `Value()`.
-* RPC (mandatory for the official node, on every surface it ships): payload type values `8` to `11` in `PayloadType`;
-  `GetRaw*Transaction` builders for the four payloads; `GetAsset`, returning the fields of section 2.1, the policy
-  with its current rates and bounds, and the live supply `Issued - Burned`; and `GetAssetBalance(AssetID, Address)`.
-  A node SHOULD also offer a list of the balances of an address from its local index. `GetBlock` and
+  them. Fee estimation uses the same fixed fee as `Transfer`, plus `Value()`. A pool MAY drop an `AssetTransfer` or
+  `AssetMint` whose recipient has not accepted the asset, since it cannot be valid until an `AssetAccept` lands.
+* RPC (mandatory for the official node, on every surface it ships): payload type values `8` to `12` in `PayloadType`;
+  `GetRaw*Transaction` builders for the five payloads; `GetAsset`, returning the fields of section 2.1, the policy
+  with its current rates and bounds, and the live supply `Issued - Burned`; and `GetAssetBalance(AssetID, Address)`,
+  which tells an account that has not accepted the asset from one that holds a balance of 0, so that a sender can check
+  before it signs. A node SHOULD also offer a list of the balances of an address from its local index. `GetBlock` and
   `GetTransaction` return the items of a bundle as ordinary transactions, so a wallet or an explorer does not need to
   know about bundles; they MAY also report the bundle of each item.
 * Explorers need no new term for supply audits: the charges go to the treasury and every other PAC amount keeps its
@@ -401,6 +438,10 @@ Nothing here is checked by consensus. Wallets and explorers agree on it so that 
   rates, not only their current values. A royalty or a tax on units of an asset, paid to a collector, is expressed with
   `TeamRate`; a deflationary asset is expressed with `BurnRate`. Rates are meant for fungible assets: on an asset of
   supply 1 every share rounds to 0.
+* Receiving an asset takes two steps: the recipient accepts, then the sender sends. A wallet asks its user before it
+  signs an `AssetAccept`, and MAY offer the acceptance as a link or a QR code that carries the `AssetID`. A distribution
+  to many accounts is a claim: the issuer publishes the `AssetID`, accounts accept, and the issuer sends to those that
+  did, 8 at a time. A sale of an NFT starts with the buyer accepting it.
 
 ## Rationale
 
@@ -462,12 +503,21 @@ and a minimum received per transfer. Here `Min < Max` already says that a rate i
 transaction replaces the minimum per recipient, and the issuer is the only authority. A separate controller (a
 multi-signature or a vote) can be added later without changing the records.
 
-**Flat charges known from the payload.** `Value()` is computed from the payload alone, so a wallet never has to guess
-a fee from the state, and no fee code depends on whether a balance entry exists, or on whether an asset has a policy:
-the record of the collector is appended at creation for that reason. A transfer to an existing holder pays
-`RecordCharge` that it did not strictly need. That is cheaper than a second code path.
+**Opt-in, so that nobody is given an asset against their will.** Anyone can create an asset with any symbol, and without
+opt-in anyone could put it in any wallet for a fee that is small in PAC: look-alike symbols, links in metadata,
+and a record added to every victim's state. With opt-in, an asset reaches an account only if that account signed for
+it. It also simplifies the rules. A transfer or a mint never appends a record, so their execution has no creation
+order to fix, their charge is 0, and the tree grows only when its owner asks and pays. The cost is two steps to
+receive an asset, and a recipient that needs a little PAC before it can accept. To the knowledge of the author, the
+XRP Ledger, Stellar and Algorand also ask the receiver to opt in. The records of the creator and of the collector are
+the only ones that an account does not accept itself: the creator signs the creation, and the collector is named by it.
 
-**PAC pays everything.** No second fee token and no sponsor. A new holder needs a little PAC before moving units.
+**Flat charges known from the payload.** `Value()` is computed from the payload alone, so a wallet never has to guess
+a fee from the state, and no fee code depends on the state. A creator that is its own collector, or that creates with
+no initial supply, pays for a record that is not appended. That is cheaper than a second code path.
+
+**PAC pays everything.** No second fee token and no sponsor. A new holder needs a little PAC to accept an asset, and
+to move it.
 
 ## Alternatives Considered
 
@@ -490,16 +540,21 @@ the record of the collector is appended at creation for that reason. A transfer 
    still set `MaxBundleItems` to 1 to get one slot per transaction.
 9. **Rates that are fixed, or that have no bounds.** Fixed rates are possible (`Min == Max`) but not the only choice.
    Unbounded rates would let an issuer take any share of any transfer.
+10. **The sender pays for the recipient's record, with no opt-in** (an earlier draft of this PIP, and the model of
+    Cardano and Solana, with a refundable reserve in each). Simpler to use, but anyone can put an asset in any wallet,
+    and without a way to remove records the state grows with the spam. Set aside for the opt-in of section 3.7.
+11. **Higher charges and wallets that hide unknown assets.** No consensus change, but it prices spam instead of
+    stopping it and leaves the records in the state. It remains a rule for wallets in any case.
 
 ## Backwards Compatibility
 
-This is a consensus upgrade. Nodes that do not implement version `V` reject payload types 8 to 11 and cannot compute
+This is a consensus upgrade. Nodes that do not implement version `V` reject payload types 8 to 12 and cannot compute
 the extended state root. Existing payload types, account records and validator records keep their encoding. Accounts
 that never use the feature are unaffected.
 
 Activation follows [PIP-51](./pip-51.md): implementations advertise version `V`; when more than 75 % of committee power
 supports it, proposers raise the block version; from the first block of version `V` the extended root applies, the
-four types are legal and a block body may carry bundles, with its transaction root computed over the entries of its
+five types are legal and a block body may carry bundles, with its transaction root computed over the entries of its
 list. Before that block they MUST be rejected as invalid payload types, a bundle is an invalid entry, and the asset
 tree does not exist. Software that reads block bodies (explorers, indexers, light clients) must learn the bundle. State
 sync and snapshots MUST carry the asset tree from then on. Testnet SHOULD activate first.
@@ -508,7 +563,7 @@ sync and snapshots MUST carry the asset tree from then on. Testnet SHOULD activa
 
 Implementations MUST pass at least these. They add no rule to the Specification.
 
-* **Activation and root.** Types 8 to 11 are rejected below `V`. The first block of `V` has the extended root with
+* **Activation and root.** Types 8 to 12 are rejected below `V`. The first block of `V` has the extended root with
   `assetRoot` equal to 32 zero bytes. The root changes when a record changes, and a restart reloads the same root.
 * **Create.** A fixed asset, a minting asset and an asset with `InitialSupply == 0` are created. Rejected: an empty
   symbol, 13 bytes, lowercase, a symbol of `PAC`, `Decimals` 10, `MaxSupply` 0 or above `MaxAssetSupply`,
@@ -517,11 +572,16 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   outside `[Min, Max]`, a `Max` above 10 000, `TeamRate.Max + BurnRate.Max` above 10 000, all `Max` at 0, `TeamCap` of
   0, a validator `Collector`. With a policy, the `Collector` holding exists at balance 0 right after creation, and
   is not duplicated when the collector is the creator.
+* **Accept.** An account accepts an asset: a holding with balance 0 is appended at the next index, `RecordCharge`
+  reaches the treasury, and the account can then receive. Rejected: an unknown asset, a second `AssetAccept` of the same
+  asset by the same account (nothing is charged twice), insufficient PAC, a treasury or validator `From`. The collector
+  and a creator with an initial supply hold a record from creation, and cannot accept again. An accept and a transfer
+  to that account in one bundle, in that order, both succeed; in the other order the transfer makes the block invalid.
 * **Transfer.** One recipient and eight succeed; nine fail. Rejected: a repeated `To`, `To == From`, a validator
-  recipient, an amount of 0 or below, an unknown asset, a balance that is too small, and 8 recipients of `2^62` each
-  (the overflow case of PIP-54), which fails before any addition. A transfer to the zero address raises `Burned` and
-  creates no holding. A holding that reaches zero stays. `Value()` is `RecordCharge * R` for every payload and counts
-  only the recipients that are not the zero address. New records take the order of the recipient list.
+  recipient, an amount of 0 or below, an unknown asset, a balance that is too small, a recipient that has not
+  accepted the asset, and 8 recipients of `2^62` each (the overflow case of PIP-54), which fails before any addition. A
+  transfer to the zero address needs no holding, raises `Burned` and creates no record. A holding that reaches zero
+  stays. `Value()` is 0, and the number of records of the tree is the same before and after any transfer.
 * **Rates.** The example of section 3.3 gives `team = 15 000`, `burn = 5 000` and `net = 980 000`. With the same rates,
   99 gives `team = 1`, `burn = 0`, `net = 98`, and 49 gives `team = burn = 0`. A transfer of `2^63 - 1` with rates
   of 10 000 in total is computed without leaving the `int64` range, and `team + burn + net` equals `Amount` for a
@@ -533,7 +593,9 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   non-issuer, an asset without a policy and an unknown asset fail. An asset with `Min == Max` accepts only that
   value. Bounds, cap and collector never change.
 * **Mint.** Only the issuer mints. A mint above `MaxSupply - Issued` fails. After a burn, a mint still cannot pass
-  `MaxSupply` in total. An asset with `MaxSupply == InitialSupply` rejects every mint.
+  `MaxSupply` in total. An asset with `MaxSupply == InitialSupply` rejects every mint. A mint to an account that has not
+  accepted the asset fails, including a mint by an issuer to itself when `InitialSupply` was 0 and it is not the
+  collector. A mint appends no record and has `Value()` 0.
 * **Bundles.** A block with 200 asset transactions in 25 full bundles and 975 other transactions is valid; 201 asset
   transactions are invalid. A block with 17 asset transactions in a bundle of 8, a bundle of 8 and a bundle of 1 is
   valid, and the same 17 in a bundle of 8, a bundle of 5 and a bundle of 4 is invalid (two partial bundles). Invalid: an
@@ -550,7 +612,7 @@ Implementations MUST pass at least these. They add no rule to the Specification.
 
 ## Reference Implementation
 
-None yet. Before this PIP leaves Draft, a pull request will add the four payloads, the asset tree, the extended root,
+None yet. Before this PIP leaves Draft, a pull request will add the five payloads, the asset tree, the extended root,
 the bundles, the block cap and the RPC to the Pactus node, and report on stated hardware: the time to validate a block
 with `MaxAssetTxPerBlock` asset transactions of 8 recipients each, for BLS, Ed25519 and secp256k1 senders, which is
 what sets the cap; the cost of a tree update, the size of the store per record, and the effect on
@@ -576,14 +638,19 @@ The same care applies to PAC: `Value() + fee` and every balance are bounded by `
 
 ### State growth
 
-Records are never removed, as for accounts, so a record is paid for once, by `RecordCharge` and the fee. In the
-worst case, a sender who fills the cap for ever with 8 new recipients per transaction creates 1 600 holdings of 34 bytes
-per block, about 13.8 million a day and 470 MB of records, and pays about 31 100 PAC a day in charges and fees. Today a
-sender can create up to 8 000 accounts per 1 000-transaction block with `BatchTransfer`, so the bound is lower than the
-one Pactus already accepts for accounts, at a comparable price per record. Creating an asset adds one asset record of
-at most 134 bytes, and costs the fee plus 2 or 3 `RecordCharge`, so asset spam is cheaper per record than holding spam
-and is bounded by the same cap. Both the cap and `RecordCharge` are constants that a later version can change. Removal
-of empty holdings, with a deposit, is left for a later PIP.
+Records are never removed, as for accounts, so a record is paid for once, by `RecordCharge` and the fee, and only
+`AssetCreate` and `AssetAccept` append one. Transfers and mints never grow the state, and nobody can make an account
+pay for a record it did not ask for. In the worst case, a sender who fills the cap for ever with creations that each
+append 3 records (an asset of at most 134 bytes and two holdings of 34 bytes) adds 40 KB per block, about 5.2 million
+records and 349 MB a day, and pays about 22 500 PAC a day in charges and fees. Accepting only (one 34-byte record per
+transaction) adds 59 MB a day for about 19 000 PAC. Today a sender can create up to 8 000 accounts per
+1 000-transaction block with `BatchTransfer`, about 830 MB a day, so the bound is lower than the one Pactus already
+accepts for accounts. Both the cap and `RecordCharge` are constants that a later version can change. Removal of empty
+holdings, with a refund, is left for a later PIP.
+
+An account that accepts an asset by mistake keeps an empty record for ever, and cannot reject later transfers of it,
+since anyone who holds the asset may send it. That costs the account nothing more than its own acceptance, and it
+never had to accept.
 
 ### Block capacity
 
@@ -618,10 +685,11 @@ that it moves.
 
 ### Identity and spoofing
 
-Symbols are not unique and anyone can create one, such as `USDT`. A wallet MUST show the `AssetID` and the issuer
-address and not only the symbol, MUST NOT trust a symbol, and SHOULD hide assets that a user did not ask for: a
-sender can credit any account with any asset, at no cost to the recipient. The symbol `PAC` is reserved so that no
-asset looks like the coin.
+Symbols are not unique and anyone can create one, such as `USDT`. Opt-in stops an asset from being pushed into a
+wallet, but a user can still accept a look-alike by following a link or a QR code. A wallet MUST show the `AssetID` and
+the issuer address and not only the symbol, MUST NOT trust a symbol, and MUST ask for confirmation, with those two
+values, before it signs an `AssetAccept`. The symbol `PAC` is reserved so that no asset looks like the coin. An
+`AssetID` in a link is a request and not an authorization: nothing happens until the user signs.
 
 ### Keys, replay and burns
 
@@ -638,7 +706,7 @@ Balances and transfers are public, as for PAC. This PIP adds no privacy.
 
 * **Collections.** A token-ID dimension if one asset per item proves too costly.
 * **A separate rate controller,** for example a multi-signature or a vote, and a delay before a new rate applies.
-* **Removal of empty holdings,** with a deposit, to bound state by supply.
+* **Removal of empty holdings,** with a refund of the acceptance charge, to bound state by what is in use.
 * **An atomic swap payload,** so that two parties can exchange assets or an asset and PAC in one transaction.
 * **An off-chain layer** with its own accountability, if asset demand outgrows `MaxAssetTxPerBlock`.
 
