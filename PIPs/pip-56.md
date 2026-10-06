@@ -304,9 +304,13 @@ it signs, and no charge depends on the state.
 
 Only creation and acceptance append records, so only they pay a charge, and the account that causes a record is the
 account that pays for it. A creator that is also the collector, or whose `InitialSupply` is 0, pays for a record that
-is not appended; that is cheaper than a charge that depends on the state. The charge is credited to the treasury, and
-the fixed fee follows its existing path. The rates of section 3.3 are a different thing: they are quantities of the
-asset, set by its issuer, and PAC is not involved.
+is not appended; that is cheaper than a charge that depends on the state.
+
+**Where the PAC goes.** This PIP changes nothing about the fixed fee. Every asset transaction pays it exactly as a
+`Transfer` does, and it goes wherever the fee of any other transaction goes, whatever that path is or becomes. Only
+`RecordCharge` is explicitly credited to the treasury, and never to the proposer, so that a validator cannot refund
+the cost of the records it creates itself. Nothing else is paid in PAC. The rates of section 3.3 are a different
+thing: they are quantities of the asset, set by its issuer, and PAC is not involved.
 
 #### 3.6 `AssetSetRate` (type 11)
 
