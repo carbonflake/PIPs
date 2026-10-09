@@ -7,7 +7,7 @@ status: Draft
 type: Standards Track
 category: Core
 created: 2026-10-02
-updated: 2026-10-06
+updated: 2026-10-09
 requires: 39, 51, 54
 ---
 
@@ -39,11 +39,11 @@ An asset may carry an optional **transfer policy**: a team rate and a burn rate,
 applies with a few lines of integer arithmetic. The rates are variable but bounded: each has a minimum and a maximum
 that are fixed at creation, and only the issuer can move a rate between them.
 
-Batching is automatic and happens at two levels. A sender can put up to 8 recipients in one transaction, which costs one
-signature for up to 8 transfers. And the block proposer packs the asset transactions of **any** senders, as they
+Batching happens at two levels. A sender can put up to 8 recipients in one transaction, which costs one signature for
+up to 8 transfers. And the block proposer automatically packs the asset transactions of **any** senders, as they
 arrive, into **bundles** of up to 8: every bundle of a block but at most one is full. Users send ordinary transactions
-and never see a bundle. A bundle takes one slot of the block, so the `MaxAssetTxPerBlock` (200) asset transactions that
-a block may carry use at most 25 of its 1 000 slots, and PAC always keeps the rest. A balance is paid for with a
+and never see a bundle. A bundle takes one slot of the block, so the `MaxAssetTxPerBlock` (200) asset transactions
+that a block may carry use at most 25 of its 1 000 slots, and PAC always keeps the rest. A balance is paid for with a
 deposit that is returned when it is closed; an asset record, which is permanent, is paid for once.
 
 ## Motivation
@@ -198,8 +198,8 @@ After every transaction, for every asset:
 And for the tree:
 
 * a holding is placed only by `AssetCreate` and `AssetAccept`, and only for the account that signed, and removed only
-  by `AssetClose`, for its owner, at a balance of 0, so a transfer or a mint never changes the number of records or
-  the PAC locked, and nobody holds a record that it did not sign for;
+  by `AssetClose`, for its owner, after burning what is left of its balance, so a transfer or a mint never changes the
+  number of records or the PAC locked, and nobody holds a record that it did not sign for;
 * the `Deposit` of the holdings add up to `DepositTotal`, and the PAC that accounts have lost to deposits is exactly
   `DepositTotal`: balances, stake, treasury and `DepositTotal` are conserved by every asset transaction, the fee being
   paid where the fee of any other transaction goes;
@@ -232,8 +232,8 @@ TypeAssetClose    = Type(13)
   together with the fee. Every sum that involves `Value()`, the fee, a deposit or a balance MUST be rejected before it
   exceeds `MaxNanoPAC` ([PIP-54](./pip-54.md)). `AssetClose` is the one payload that gives PAC back to `From`.
 * Every asset quantity is an `int64` with `1 <= quantity <= MaxAssetSupply`, except the `InitialSupply` of
-  `AssetCreate`, which may be 0. A sum of quantities MUST be checked before it is added, in the form
-  `total > MaxAssetSupply - amount`.
+  `AssetCreate` and the `MaxBurn` of `AssetClose`, which may be 0. A sum of quantities MUST be checked before it is
+  added, in the form `total > MaxAssetSupply - amount`.
 * An asset transaction is an ordinary transaction, and it travels through the network and the pools as one. In a block
   it is carried only inside a bundle (section 4).
 * A recipient is an account address. Treasury and validator addresses are rejected, because nothing could move the
@@ -357,8 +357,8 @@ Two kinds of record cost PAC, and they are priced differently because they leave
 * An **asset record** is never removed: every holding refers to it by its index, and the index must keep its meaning.
   It is paid for once, by `AssetCharge`, which goes to the treasury and is not returned.
 * A **holding** can be closed by its owner. It is paid for by `HoldingDeposit`, which is locked while the record
-  exists and returned in full, as it was posted, when `AssetClose` removes the record. The locked PAC belongs to no
-  account and is counted in `DepositTotal`.
+  exists and returned as it was posted, less the fee of the close, when `AssetClose` removes the record. The locked
+  PAC belongs to no account and is counted in `DepositTotal`.
 
 What each payload takes from `From` besides the fee is computed from the payload alone, so a wallet knows it before it
 signs and nothing depends on the state:
@@ -391,14 +391,14 @@ involved.
 | `NewTeamRate` | `uint16` | The new `TeamRate.Current`, in basis points |
 | `NewBurnRate` | `uint16` | The new `BurnRate.Current`, in basis points |
 
-`Check`: the asset exists and has a policy; `From == Issuer`; `TeamRate.Min <= NewTeamRate <= TeamRate.Max` and
-`BurnRate.Min <= NewBurnRate <= BurnRate.Max`; if `NewTeamRate` is above 0, `Collector` has a holding of the asset,
-that is, it has accepted it; `PAC(From) >= fee`. `Execute`: debit the fee and set `TeamRate.Current` and
-`BurnRate.Current` to the new values. Nothing else about the policy ever changes: not the bounds, the cap or the
-collector. The new rates apply to every transfer included after this transaction in the same block or later. A
-transaction that sets the current values again does nothing and obeys the same rules. There is no nonce, so two
-`AssetSetRate` signed one after the other may be included in either order; an issuer that wants a given final value
-waits for the first to be included before it signs the second.
+`Value()` is 0. `Check`: the asset exists and has a policy; `From == Issuer`; `TeamRate.Min <= NewTeamRate <=
+TeamRate.Max` and `BurnRate.Min <= NewBurnRate <= BurnRate.Max`; if `NewTeamRate` is above 0, `Collector` has a
+holding of the asset, that is, it has accepted it; `PAC(From) >= fee`. `Execute`: debit the fee and set
+`TeamRate.Current` and `BurnRate.Current` to the new values. Nothing else about the policy ever changes: not the
+bounds, the cap or the collector. The new rates apply to every transfer included after this transaction in the same
+block or later. A transaction that sets the current values again does nothing and obeys the same rules. There is no
+nonce, so two `AssetSetRate` signed one after the other may be included in either order; an issuer that wants a given
+final value waits for the first to be included before it signs the second.
 
 An asset whose bounds satisfy `Min == Max` for both rates has fixed rates and can never be changed; its issuer holds no
 authority over them. The bounds are a promise that anyone can read in the state, as `MaxSupply` is.
@@ -495,8 +495,9 @@ fee, lock time or signature of its own. These rules are consensus rules:
    over the entries of its list, using the bundle ID for a bundle. The root therefore commits to the packing, and
    nobody can repack a block without changing its hash. A proof that an item is in a block is a proof of its bundle
    and the list of at most 8 IDs.
-7. A transaction ID appears at most once in a block, as an item of one bundle, of two bundles, or as any other entry
-   of the list. A block that repeats one is invalid, so a transaction cannot be run twice in the same block.
+7. A transaction ID appears at most once in a block: not twice in one bundle, not in two bundles, and not both in a
+   bundle and as another entry of the list. A block that repeats one is invalid, so a transaction cannot be run twice
+   in the same block.
 
 The wire encoding of a bundle belongs to the reference implementation. It MUST be deterministic and carry only a count
 and the items.
@@ -542,12 +543,14 @@ and this work from a block.
   of `MaxSize`, like `BatchTransfer`, so asset transactions cannot crowd out payments and payments cannot evict them.
   Fee estimation uses the same fixed fee as `Transfer`, plus `Value()`. A pool MAY drop an `AssetTransfer` or
   `AssetMint` whose recipient has not accepted the asset, and an `AssetTransfer` of an asset whose team rate is above
-  0 and whose collector has not accepted it, since neither can be valid until an `AssetAccept` or an `AssetSetRate`
-  lands. A pool SHOULD run the checks in the order of their cost: `BasicCheck`, then the PAC balance (for an
-  `AssetClose`, the PAC balance plus the deposit that it returns, since it pays its fee from the refund), then the
-  signature, then the asset-state `Check`. It SHOULD also limit the number of pending asset transactions per sender,
-  because each one can be valid alone against the current state while all together are not (several transfers of the
-  same units), and without a limit one funded account can fill the pool with transactions that the proposer will skip.
+  0 and whose collector has not accepted it, but only when no transaction in the pool can make it valid (an
+  `AssetAccept` of that recipient or collector, or an `AssetSetRate` to a team rate of 0), since a proposer packs both
+  in one block (section 4.2). A pool SHOULD run the checks in the order of their cost: `BasicCheck`, then the PAC
+  balance (for an `AssetClose`, the PAC balance plus the deposit that it returns, since it pays its fee from the
+  refund), then the signature, then the asset-state `Check`. It SHOULD also limit the number of pending asset
+  transactions per sender, because each one can be valid alone against the current state while all together are not
+  (several transfers of the same units), and without a limit one funded account can fill the pool with transactions
+  that the proposer will skip.
 * RPC (mandatory for the official node, on every surface it ships): payload type values `8` to `13` in `PayloadType`;
   `GetRaw*Transaction` builders for the six payloads; `GetAssetState`, returning `DepositTotal`, `FreeHead` and the
   number of records of the tree; `GetAsset`, returning the fields of section 2.1, the policy with its current rates
@@ -586,8 +589,8 @@ Nothing here is checked by consensus. Wallets and explorers agree on it so that 
   signs an `AssetAccept`, and MAY offer the acceptance as a link or a QR code that carries the `AssetID`. A
   distribution to many accounts is a claim: the issuer publishes the `AssetID`, accounts accept, and the issuer sends
   to those that did, 8 at a time. A sale of an NFT starts with the buyer accepting it. A wallet shows the deposits as
-  locked PAC, never as spendable PAC, and SHOULD offer to close the balances that the user no longer wants, showing
-  the units that the close would burn, which returns the deposits.
+  locked PAC, never as spendable PAC, and SHOULD offer to close the balances that the user no longer wants, which
+  returns their deposits, showing the units that each close would burn.
 
 ## Rationale
 
@@ -653,16 +656,16 @@ multi-signature or a vote) can be added later without changing the records.
 without opt-in anyone could put it in any wallet for a fee that is small in PAC: look-alike symbols, links in
 metadata, and a record added to every victim's state. With opt-in, an asset reaches an account only if that account
 signed for it. It also simplifies the rules. A transfer or a mint never places a record, so their execution has no
-creation order to fix, their charge is 0, and the tree grows only when its owner asks and locks a deposit. The cost is
-two steps to receive an asset, and a recipient that needs a little PAC for the deposit before it can accept. To the
-knowledge of the author, the XRP Ledger, Stellar and Algorand also ask the receiver to opt in. There is no exception:
-the creator's own record is placed by the creation it signed, and the collector named by a policy must accept like
-anyone else. Creating the collector's record at creation would let an issuer put an asset on any account by naming it.
-Instead, a transfer of an asset whose team rate is above 0 is invalid until the collector accepts, which costs nobody
-but the issuer that named it. The condition is on the rate and not on the existence of a policy so that the issuer has
-a way out: with `TeamRate.Min` at 0, setting the rate to 0 removes the team share, and with it the need for a
-collector that may never accept. `AssetSetRate` obeys the same rule, so that the issuer cannot block its own asset by
-raising the rate before the collector has accepted.
+creation order to fix, their charge is 0, and a holding is placed only when its owner asks and locks a deposit. The
+cost is two steps to receive an asset, and a recipient that needs a little PAC for the deposit before it can accept.
+To the knowledge of the author, the XRP Ledger, Stellar and Algorand also ask the receiver to opt in. There is no
+exception: the creator's own record is placed by the creation it signed, and the collector named by a policy must
+accept like anyone else. Creating the collector's record at creation would let an issuer put an asset on any account
+by naming it. Instead, a transfer of an asset whose team rate is above 0 is invalid until the collector accepts, which
+costs nobody but the issuer that named it. The condition is on the rate and not on the existence of a policy so that
+the issuer has a way out: with `TeamRate.Min` at 0, setting the rate to 0 removes the team share, and with it the need
+for a collector that may never accept. `AssetSetRate` obeys the same rule, so that the issuer cannot block its own
+asset by raising the rate before the collector has accepted.
 
 **A refundable deposit and a free list, so that unused balances are reused.** The XRP Ledger, Stellar and Algorand (to
 the knowledge of the author) lock a reserve that the holder gets back when it closes its line, and
@@ -712,8 +715,8 @@ fee to accept an asset, and for the fee to move it.
     and the recipient has no say in the record that is created for it. Set aside for the opt-in of section 3.7.
 11. **Higher charges and wallets that hide unknown assets.** No consensus change, but it prices spam instead of
     stopping it, and the records stay in the state. It remains a rule for wallets in any case.
-12. **Balances that are never closed, paid for once**. The simplest rule, but the
-    state only grows and its owners get nothing back, which is weaker than the reserves of the chains above.
+12. **Balances that are never closed, paid for once.** The simplest rule, but the state only grows and its owners get
+    nothing back, which is weaker than the reserves of the chains above.
 
 ## Backwards Compatibility
 
@@ -787,7 +790,7 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   setting `TeamRate` to 0 makes transfers valid again, and setting it back above 0 fails until the collector
   accepts, after which it succeeds. With `TeamRate.Min` above 0, only the acceptance of the collector makes transfers
   valid, and an `AssetSetRate` that keeps `TeamRate` above 0 fails until then. An issuer that is its own collector is
-  never blocked. A rate of 0 for the team share is accepted whatever the state of the collector.
+  never blocked. When `TeamRate.Min` is 0, a team rate of 0 is accepted whatever the state of the collector.
 * **Mint.** Only the issuer mints. A mint above `MaxSupply - Issued` fails. After a burn, a mint still cannot pass
   `MaxSupply` in total. An asset with `MaxSupply == InitialSupply` rejects every mint. A mint to an account that has not
   accepted the asset fails, including a mint by an issuer to itself when `InitialSupply` was 0 and it holds no record.
