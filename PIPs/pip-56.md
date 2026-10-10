@@ -115,7 +115,8 @@ deposits and `AssetCharge` keep the tree far below this bound (Security Consider
 in whatever order it reads the records, MUST obtain the same root as a node that built it block by block, at every
 size up to this bound.
 
-`HeaderRecord` (kind `0`), 13 bytes, at index 0 from the first block of version `V`:
+`HeaderRecord` (kind `0`), 13 bytes in this PIP (section 6 lets a later version append fields), at index 0 from the
+first block of version `V`:
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -131,9 +132,9 @@ size up to this bound.
 | `Symbol` | `uint8` length, then bytes | 1 to 12 bytes of `A-Z0-9` |
 | `Decimals` | `uint8` | At most `MaxDecimals` |
 | `MaxSupply` | `int64` | Cap on `Issued`, fixed at creation |
-| `Issued` | `int64` | Units created so far, never decreases |
-| `Burned` | `int64` | Units destroyed so far, never decreases |
-| `Issuer` | `Address` | The creator. The only account that may mint or set a rate |
+| `Issued` | `int64` | Units created so far. Never decreases for an asset created by `AssetCreate` (section 6) |
+| `Burned` | `int64` | Units destroyed so far. Never decreases for an asset created by `AssetCreate` (section 6) |
+| `Issuer` | `Address` | The creator, an account address. The only account that may mint or set a rate. The zero address is reserved for assets of later PIPs (section 6) |
 | `MetaHash` | 32 bytes | Hash of an off-chain description, fixed at creation. All zero if none |
 | `PolicyPresent` | `uint8` | `0` or `1`. Fixed at creation |
 
@@ -259,6 +260,7 @@ TypeAssetBundle   = Type(14)
   units from them. The only exception is the zero address as a recipient of `AssetTransfer` (section 3.3). Any other
   recipient MUST already hold a `HoldingRecord` of the asset, possibly with a balance of 0: it MUST have accepted the
   asset (section 3.7).
+* A payload that names an asset rejects an `AssetID` of 0 in `BasicCheck` (section 2.1).
 * `PAC(a)` is the PAC balance of the account `a`, in nano PAC. A holding has its own `Balance`, in units of the asset,
   and the two are never mixed: a check on PAC always says `PAC(From)`.
 * `Check` reads the state and changes nothing. `Execute` applies the whole transaction or none of it.
@@ -650,14 +652,14 @@ invariant of this PIP. The values that they reserve are invalid in this PIP and 
    append fields to the header in this way, and rewrites the header in the longer encoding at its first block. Every
    PAC total of the header belongs to no account, and the conservation of section 2.3 and the supply audits of
    sections 3.5 and 5 count them all.
-5. **PAC in a pair.** No asset has the `AssetID` 0, and every payload of this PIP rejects it. A later PIP may use the
-   `AssetID` 0 to name PAC, for example in a pair or a path of swaps.
+5. **PAC in a pair.** No asset has the `AssetID` 0, and every payload of this PIP that names an asset rejects it. A
+   later PIP may use the `AssetID` 0 to name PAC, for example in a pair or a path of swaps.
 6. **Assets without an issuer.** `AssetCreate` always sets an account as `Issuer`, so no asset of this PIP has the
    zero address as `Issuer`. A later PIP may create such assets, for example the shares of a pool. No `AssetMint` or
    `AssetSetRate` can ever pass for them, since `From` is never the treasury, and the PIP that creates them defines
    how their `Issued` and `Burned` move, as long as the first two invariants of section 2.3 hold: the bounds, and the
-   conservation of units. The third invariant and the cap on `Issued` of section 3.4 are promises of the issuer of an
-   asset created by `AssetCreate`.
+   conservation of units. The third invariant, which makes `MaxSupply` a cap on the units ever issued (section 3.4),
+   is a promise of the issuer of an asset created by `AssetCreate`.
 7. **Signatures, opt-in and charges.** The payloads of a later PIP follow section 3.1. They credit units only to a
    holding that its owner opened or to records of their own PIP, they place a holding only for the account that
    signs, with `HoldingDeposit`, and they compute `Value()` from the payload and the constants, never from the state.
@@ -790,9 +792,9 @@ paid for once, which is why `AssetCharge` is not small. Their cost is also what 
 part of the state grow, which is the only part of the state that the deposits do not bound.
 
 **Charges known from the payload.** `Value()` is computed from the payload and the constants of section 1, so a wallet
-never has to guess a fee from the state, and no fee code depends on the state. Because only creation and acceptance
-place records, and which records they place follows from the payload, each charge or deposit is for a record that is
-in fact placed.
+never has to guess a fee from the state, and no fee code depends on the state. Because, in this PIP, only creation and
+acceptance place records, and which records they place follows from the payload, each charge or deposit is for a
+record that is in fact placed.
 
 **Room for pools, but no pools.** Exchanges are where token chains lose the most: price manipulation, sandwiches,
 inflated first shares, honeypots. They deserve a PIP of their own, reviewed on its own. This PIP only reserves what
@@ -871,10 +873,10 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   treasury and is never returned. The creator's holding is placed, with a deposit that raises `DepositTotal`, only if
   `InitialSupply > 0` or the policy names the creator as collector. The asset record is always appended at the end,
   even when there is a free slot. With a policy, rejected: `Current` outside `[Min, Max]`, a `Max` above 10 000,
-  `TeamRate.Max + BurnRate.Max` above 10 000, all `Max` at 0, `TeamCap` of 0, a validator `Collector`. With a policy
-  that names the creator as collector, the creator's holding exists right after creation, at balance 0 if
-  `InitialSupply` is 0, and is placed once. With a policy that names another account as collector, no record is placed
-  for that account, and its PAC balance is unchanged.
+  `TeamRate.Max + BurnRate.Max` above 10 000, all `Max` at 0, `TeamCap` of 0, a treasury or validator `Collector`.
+  With a policy that names the creator as collector, the creator's holding exists right after creation, at balance 0
+  if `InitialSupply` is 0, and is placed once. With a policy that names another account as collector, no record is
+  placed for that account, and its PAC balance is unchanged.
 * **Accept.** An account accepts an asset: a holding with balance 0 is placed, `HoldingDeposit` leaves its PAC balance
   and raises `DepositTotal`, nothing reaches the treasury, and the account can then receive. With no free slot the
   record is appended at the next index; with one, it takes the slot at `FreeHead`. Rejected: an unknown asset, a second
@@ -986,7 +988,7 @@ The same care applies to PAC: `Value() + fee` and every balance are bounded by `
 
 ### State growth
 
-The state has two parts, and they are bounded differently.
+In this PIP, the state has two parts, and they are bounded differently.
 
 **Balances in use are bounded by the PAC that their owners lock.** A holding exists only while its owner keeps a deposit
 of `HoldingDeposit` locked for it, and closing it returns the deposit and frees the slot, so the number of holdings in
