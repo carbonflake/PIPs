@@ -47,7 +47,8 @@ format of a block does not change. A bundle takes one slot of the block, so the 
 transactions that a block may carry use at most 25 of its 1 000 slots, and PAC always keeps the rest. A balance is
 paid for with a deposit that is returned when it is closed; an asset record, which is permanent, is paid for once.
 This PIP has no exchange, but it leaves room for one: section 6 reserves what a later PIP on liquidity pools needs, so
-that such a PIP changes nothing here.
+that such a PIP changes nothing here. It is meant for testnet first: mainnet waits for the testnet plan of the
+Reference Implementation section.
 
 ## Motivation
 
@@ -60,8 +61,10 @@ This PIP keeps the design as small as the problem allows, in the spirit of Pactu
 * **Robust.** Six payloads and one rule per payload. Every amount is bounded and every sum checked before it is
   added ([PIP-54](./pip-54.md)). The only authorities an asset can have are a mint capped at creation and rates that
   move inside bounds fixed at creation.
-* **Reliable.** Assets carry exactly the trust of PAC: the validators check every rule, and nobody else is trusted.
-  Nothing depends on an operator, an indexer or an off-chain data store.
+* **Reliable.** Assets rest on the trust of PAC and on nothing else: the validators check every rule, and nobody else
+  is trusted. Nothing depends on an operator, an indexer or an off-chain data store. The new rules are consensus code,
+  though, and a bug in them can harm the whole chain, as [PIP-54](./pip-54.md) showed: hence the bounds, the tests,
+  and the testnet plan that mainnet waits for (Reference Implementation).
 * **Light.** No per-block hook, no signature scheme, no epoch, no registry. The load that assets put on L1 is bounded
   by a constant, not by a market.
 
@@ -857,7 +860,7 @@ then on rejects any block of a lower version and proposes that version or higher
 committed, a block of a lower version is therefore invalid, and the existence of the asset tree says the same in the
 state. The format of a block does not change, but software that walks the transactions of a block (explorers,
 indexers, light clients) must learn to open a bundle. State sync and snapshots MUST carry the asset tree from then on.
-Testnet SHOULD activate first.
+Testnet activates first, and mainnet only after the testnet plan of the Reference Implementation section has passed.
 
 ## Test Cases
 
@@ -967,6 +970,32 @@ the bundles, the block cap and the RPC to the Pactus node, and report on stated 
 with `MaxAssetTxPerBlock` asset transactions of 8 recipients each, for BLS, Ed25519 and secp256k1 senders, which is
 what sets the cap; the cost of a tree update, the size of the store per record, and the effect on state sync.
 
+### Testnet plan before mainnet
+
+This PIP SHOULD NOT activate on mainnet before its reference implementation has run on testnet through the steps
+below, with the results published. Each step tests a failure, not only the path where everything works.
+
+1. **Load.** Blocks at the cap: 25 bundles of 8 `AssetTransfer` with 8 recipients each, for BLS, Ed25519 and
+   secp256k1 senders, and the other 975 entries filled with `BatchTransfer`. The time to validate and to commit them,
+   on the smallest hardware that validators are expected to run, sets `MaxAssetTxPerBlock` with a wide margin under
+   the block interval.
+2. **Restarts and snapshots.** Nodes restarted at random, nodes started from a snapshot and nodes synced from the
+   first block keep the state root of the others at every height; a dedicated test does the same with an asset tree of
+   at least 50 million records (Test Cases).
+3. **Activation.** The switch to version `V` under [PIP-51](./pip-51.md), with and without enough support, and the
+   floor of the block version: after the first block of `V`, no block of a lower version is accepted, even after a
+   restart.
+4. **Hostile proposers and peers.** Blocks with half-empty, nested or oversized bundles, repeated transaction IDs,
+   asset transactions signed by the treasury, or 1 000 bundles of 8 items are rejected, and rejecting them costs no
+   more than reading them. Every pool drops a bundle that is gossiped to it.
+5. **Pools under flood.** A flood of asset transactions that are valid alone and invalid together, with the
+   per-sender limit on: payments keep flowing, and the asset lane recovers when the flood stops.
+6. **State over time.** Weeks of mixed traffic, with accepts, closes and creations at the cap: the size of the store,
+   the length of the tree and `DepositTotal` stay within the bounds of Security Considerations, and the invariants of
+   section 2.3 hold at every block.
+7. **Wallets and explorers.** The RPC of section 5 and the wallets show deposits as locked PAC, the net amount of a
+   transfer with rates, the bounds of the rates, whether a collector has accepted, and the units that a close burns.
+
 ### Open items of this draft
 
 * **A reference implementation.** No part of this PIP has run inside a Pactus node.
@@ -976,6 +1005,7 @@ what sets the cap; the cost of a tree update, the size of the store per record, 
   node authors.
 * **Constants.** Every value of section 1 is an initial proposal, not measured. `MaxAssetTxPerBlock` is set by the
   benchmark of the Reference Implementation.
+* **The testnet plan.** None of it has run, and mainnet waits for it.
 
 ## Security Considerations
 
@@ -1034,13 +1064,13 @@ The bundle rules keep assets to at most 25 slots of a block (section 4.3), so PA
 proposer cannot take more by packing badly, because at most one bundle may be partial. The **work** of assets is
 bounded by `MaxAssetTxPerBlock` alone: a bundle does not lower the signatures to verify or the records to write, so
 that number must come from the benchmark and not from the slot arithmetic. A spammer who fills the asset lane (200
-transactions, 2 PAC a block at the fixed fee of the pools) delays other asset users and does not touch PAC. Pools are
-local policy, and the separate asset pool keeps asset transactions from filling the memory of a node at the expense of
-payments. The ID of a bundle commits to its packing, so a relay cannot repack the body of a block without changing its
-hash, and a block whose packing breaks section 4.1 is invalid even if every item is valid. A bundle carries no
-signature, like the subsidy transaction, but it authorizes nothing: every item carries and checks its own signature,
-every validator checks the rules of the envelope, and a pool rejects a bundle, so nobody can flood the pools with
-unsigned bundles.
+transactions, 2 PAC a block at the fixed fee of the pools) delays other asset users; it takes no slot from PAC, and
+the work and the state that it adds to a block stay within the bounds of `MaxAssetTxPerBlock`. Pools are local policy,
+and the separate asset pool keeps asset transactions from filling the memory of a node at the expense of payments. The
+ID of a bundle commits to its packing, so a relay cannot repack the body of a block without changing its hash, and a
+block whose packing breaks section 4.1 is invalid even if every item is valid. A bundle carries no signature, like the
+subsidy transaction, but it authorizes nothing: every item carries and checks its own signature, every validator
+checks the rules of the envelope, and a pool rejects a bundle, so nobody can flood the pools with unsigned bundles.
 
 ### The issuer
 
