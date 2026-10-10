@@ -76,9 +76,9 @@ concatenation, and a quoted string is its ASCII bytes. Fields are encoded in the
 the existing payloads: `Address` as in `Transfer` (one byte for the treasury address), and *varint* as the `Amount` of
 `Transfer` and the number of recipients of `BatchTransfer` ([PIP-39](./pip-39.md)). Decoding MUST consume exactly the
 declared fields, and trailing bytes make a payload invalid. A *varint* MUST use its shortest encoding, and a longer
-one is invalid, so that a payload has a single encoding. Every count and length (recipients, symbol, bundle items)
-MUST be checked against its bound before anything is allocated or read. Byte-level test vectors come with the
-reference implementation.
+one is invalid, as the varint decoder of the node already requires, so that a payload has a single encoding. Every
+count and length (recipients, symbol, bundle items) MUST be checked against its bound before anything is allocated or
+read. Byte-level test vectors come with the reference implementation.
 
 ### 1. Parameters
 
@@ -182,8 +182,9 @@ balances have been closed, their slots stay as 5-byte free records and wait for 
 
 #### 2.2 State root
 
-For a block below the version `V` that activates this PIP, the state root is unchanged. For a block of version `V` or
-higher, the root that the block header commits to, which is the state before the block as today, becomes:
+For a block below the version `V` that activates this PIP, the state root is unchanged, and once a block of version
+`V` is committed no block of a lower version is valid (Backwards Compatibility). For a block of version `V` or higher,
+the root that the block header commits to, which is the state before the block as today, becomes:
 
 ```text
 assetRoot = assetMerkle.Root()          (the tree holds at least the header record)
@@ -234,10 +235,10 @@ TypeAssetBundle   = Type(14)
 * `Signer()` is `From`. Only **account addresses** (BLS, Ed25519, secp256k1) are valid. `BasicCheck` of every asset
   payload MUST reject the treasury address and validator addresses as `From`, with an explicit test and not through
   `IsAccountAddress()`, which accepts the treasury (Security Considerations).
-* The transaction is signed, expires (`LockTime` / TTL) and is protected against replay like every other
-  transaction. No nonce is added. It is not one of the free transactions of the node (`IsFreeTx()`), so its fee
-  follows the rules of a `Transfer`: consensus bounds it by `MaxNanoPAC`, and pools require their minimum, the fixed
-  fee of 0.01 PAC by default.
+* The transaction is signed, expires (its `LockTime` is valid for `TransactionToLiveInterval`, 8 640 blocks or one day
+  on mainnet) and is protected against replay like every other transaction. No nonce is added. It is not one of the
+  free transactions of the node (`IsFreeTx()`), so its fee follows the rules of a `Transfer`: consensus bounds it by
+  `MaxNanoPAC`, and pools require their minimum, the fixed fee of 0.01 PAC by default.
 * `Value()` is the PAC that the payload takes from `From` besides the fee (section 3.5): a charge that goes to the
   treasury, a deposit that is locked, or both. It is computed from the payload and the constants of section 1, without
   reading the state, and subtracted from `From` together with the fee. Every sum that involves `Value()`, the fee, a
@@ -386,12 +387,13 @@ signed for it. A charge or a deposit is always for a record that is in fact plac
 
 **Where the PAC goes.** This PIP changes nothing about the fee. Every asset transaction pays it exactly as a
 `Transfer` does, and it goes wherever the fee of any other transaction goes, whatever that path is or becomes: today,
-the subsidy transaction pays the fees of a block to its proposer, with the block reward. Only `AssetCharge` is
-explicitly credited to the treasury, and never to the proposer, so that a validator cannot refund the cost of the
-assets it creates itself. A deposit is not paid to anyone: it is locked, and it comes back to the account that posted
-it, never to a proposer. Explorers that audit the supply MUST count `DepositTotal` next to balances and stake, as they
-count the locked deposit of an anchor ([PIP-50](./pip-50.md)); leaving it out looks like a burn. The rates of section
-3.3 are a different thing: they are quantities of the asset, set by its issuer, and PAC is not involved.
+the subsidy transaction pays the fees of a block, with the block reward, to its proposer (or, under
+[PIP-49](./pip-49.md) delegation, possibly to the owner of its stake). Only `AssetCharge` is explicitly credited to
+the treasury, and never to the proposer, so that a validator cannot refund the cost of the assets it creates itself. A
+deposit is not paid to anyone: it is locked, and it comes back to the account that posted it, never to a proposer.
+Explorers that audit the supply MUST count `DepositTotal` next to balances and stake, as they count the locked deposit
+of an anchor ([PIP-50](./pip-50.md)); leaving it out looks like a burn. The rates of section 3.3 are a different
+thing: they are quantities of the asset, set by its issuer, and PAC is not involved.
 
 #### 3.6 `AssetSetRate` (type 11)
 
@@ -576,12 +578,13 @@ and this work from a block.
   two nodes with different indexes would disagree on the validity of a block.
 * Block validation enforces the rules of section 4.1. The body of a block, its decoder and its transaction root keep
   their format, and `ID()` computes the ID of a bundle as rule 6 says. A transaction can now carry transactions, so
-  the node opens the bundles wherever it walks the transactions of a block: `BasicCheck` of a bundle runs the
-  `BasicCheck` of each item, signatures included, after the counts of rules 1 to 4 have been checked, so that a block
-  with too many items costs no more than reading it; the store saves, strips and restores the public keys of the items
-  as it does for any transaction, and so does the sync; and the store indexes (transaction by ID, replay check) record
-  each item at its own place in the bytes of the block, so a transaction is found and replay-protected whether or not
-  it sits in a bundle.
+  the node opens the bundles wherever it walks the transactions of a block (execution, store, sync, pools, gRPC and
+  ZMQ notifications, the history of the wallet): `BasicCheck` of a bundle runs the `BasicCheck` of each item,
+  signatures included, after the counts of rules 1 to 4 have been checked, so that a block with too many items costs
+  no more than reading it; the store saves, strips and restores the public keys of the items as it does for any
+  transaction, and so does the sync; and the store indexes (transaction by ID, replay check) record each item at its
+  own place in the bytes of the block, so a transaction is found and replay-protected whether or not it sits in a
+  bundle.
 * A bundle is unsigned and pays no fee, like the subsidy transaction, so the signature and fee checks of a
   transaction accept it as they accept the subsidy, and `IsFreeTx()` covers it. `IsSubsidyTx()` recognizes the subsidy
   by its signer, the treasury, and MUST stay false for a bundle, which has no signer.
@@ -592,16 +595,17 @@ and this work from a block.
 * Transaction pool: a pool is local policy, not consensus. Implementations SHOULD give the six types their own pool,
   as each payload type has one today, so asset transactions cannot crowd out payments and payments cannot evict them,
   and SHOULD let it hold at least `MaxAssetTxPerBlock` transactions (20 % of the default `MaxSize` of 1 000): a
-  proposer builds its block from its pool, and a smaller pool could not fill the cap. Fee estimation uses the same
-  fixed fee as `Transfer`, plus `Value()`. A pool MAY drop an `AssetTransfer` or `AssetMint` whose recipient has not
-  accepted the asset, and an `AssetTransfer` of an asset whose team rate is above 0 and whose collector has not
-  accepted it, but only when no transaction in the pool can make it valid (an `AssetAccept` of that recipient or
-  collector, or an `AssetSetRate` to a team rate of 0), since a proposer packs both in one block (section 4.2). A pool
-  SHOULD run the checks in the order of their cost: `BasicCheck`, then the PAC balance (for an `AssetClose`, the PAC
-  balance plus the deposit that it returns, since it pays its fee from the refund), then the signature, then the
-  asset-state `Check`. It SHOULD also limit the number of pending asset transactions per sender, because each one can
-  be valid alone against the current state while all together are not (several transfers of the same units), and
-  without a limit one funded account can fill the pool with transactions that the proposer will skip.
+  proposer builds its block from its pool, and a smaller pool could not fill the cap. Fee estimation (`CalculateFee`)
+  gives the same fixed fee as for a `Transfer`, and a wallet adds `Value()` to show the total PAC that a transaction
+  takes. A pool MAY drop an `AssetTransfer` or `AssetMint` whose recipient has not accepted the asset, and an
+  `AssetTransfer` of an asset whose team rate is above 0 and whose collector has not accepted it, but only when no
+  transaction in the pool can make it valid (an `AssetAccept` of that recipient or collector, or an `AssetSetRate` to
+  a team rate of 0), since a proposer packs both in one block (section 4.2). A pool SHOULD run the checks in the order
+  of their cost: `BasicCheck`, then the PAC balance (for an `AssetClose`, the PAC balance plus the deposit that it
+  returns, since it pays its fee from the refund), then the signature, then the asset-state `Check`. It SHOULD also
+  limit the number of pending asset transactions per sender, because each one can be valid alone against the current
+  state while all together are not (several transfers of the same units), and without a limit one funded account can
+  fill the pool with transactions that the proposer will skip.
 * RPC (mandatory for the official node, on every surface it ships): payload type values `8` to `14` in `PayloadType`;
   `GetRaw*Transaction` builders for the six payloads; `GetAssetState`, returning `DepositTotal`, `FreeHead` and the
   number of records of the tree; `GetAsset`, returning the fields of section 2.1, the policy with its current rates
@@ -731,12 +735,12 @@ the knowledge of the author) lock a reserve that the holder gets back when it cl
 is in use by the PAC that people accept to lock, instead of by what was ever created. The tree of Pactus only appends,
 so a closed balance is not cut out: its record becomes a free slot on a stack, the next balance reuses it, and no
 index moves. A node never has to shrink the tree or move a record. The tree keeps the length of its peak, with free
-slots of 5 bytes in place of the closed balances, so the deposits bound the balances in use and the price of the
-length of the tree is the fees, as it is for accounts. The deposit is refunded as it was posted, so a change of the
-constant never touches an existing record, and the fee is taken from the refund so that nobody is stuck with all its
-PAC locked. Asset records are the exception: they are permanent, since every holding points to one, and they are paid
-for once, which is why `AssetCharge` is not small. Their cost is also what an attacker pays to make the permanent part
-of the state grow, which is the only part that deposits cannot reclaim.
+slots of 5 bytes in place of the closed balances, and since a slot is appended only when none is free, the deposits
+bound the length of the tree as well as the balances in use. The deposit is refunded as it was posted, so a change of
+the constant never touches an existing record, and the fee is taken from the refund so that nobody is stuck with all
+its PAC locked. Asset records are the exception: they are permanent, since every holding points to one, and they are
+paid for once, which is why `AssetCharge` is not small. Their cost is also what an attacker pays to make the permanent
+part of the state grow, which is the only part of the state that the deposits do not bound.
 
 **Charges known from the payload.** `Value()` is computed from the payload and the constants of section 1, so a wallet
 never has to guess a fee from the state, and no fee code depends on the state. Because only creation and acceptance
@@ -757,7 +761,7 @@ fee to accept an asset, and for the fee to move it.
    need at the cost of more creations.
 5. **Shrinking the tree when a balance is closed**, by moving the last record into the hole and dropping the last
    leaf. It would give the space back for real, but it needs a tree that can drop its last leaf, which the trees of
-   Pactus do not do to the knowledge of the author, and a second tree so that an `AssetID` never moves. The free list
+   the node do not do (their width only grows), and a second tree so that an `AssetID` never moves. The free list
    bounds the records in use, and the length of the tree through its peak, with the tree that exists.
 6. **Fees in the assets themselves.** No common unit, and no way for a new holder to pay a first fee. The rates of
    section 3.3 are not fees of this kind: they are a property of the asset that its issuer chose, and they do not pay
@@ -789,18 +793,24 @@ that never use the feature are unaffected.
 Activation follows [PIP-51](./pip-51.md): implementations advertise version `V`; when more than 75 % of committee
 power supports it, proposers raise the block version; from the first block of version `V` the extended root applies,
 the asset tree exists with its header record, and the seven types are legal, so a block may carry bundles. Before that
-block the seven types MUST be rejected as invalid payload types, and the asset tree does not exist. The format of a
-block does not change, but software that walks the transactions of a block (explorers, indexers, light clients) must
-learn to open a bundle. State sync and snapshots MUST carry the asset tree from then on. Testnet SHOULD activate
+block the seven types MUST be rejected as invalid payload types, and the asset tree does not exist; the decoder of a
+node does not know the version of a block, so this rejection is a check of block validation and of the pools. The
+activation cannot be undone: today a proposer may return to a lower block version when the support of the committee
+falls, and validation accepts any version from the one of genesis, except that blocks above height 8 000 000 must have
+version 4 or higher. For this PIP, once a block of version `V` is committed, a block of a lower version is invalid,
+and a proposer proposes version `V` or higher; a node knows it from its state, since the asset tree exists. The format
+of a block does not change, but software that walks the transactions of a block (explorers, indexers, light clients)
+must learn to open a bundle. State sync and snapshots MUST carry the asset tree from then on. Testnet SHOULD activate
 first.
 
 ## Test Cases
 
 Implementations MUST pass at least these. They add no rule to the Specification.
 
-* **Activation and root.** The six asset payload types are rejected below `V`. The first block of `V` has the
-  extended root, with an asset tree that holds only the header (`FreeHead` at `NoRecord`, `DepositTotal` 0). The root
-  changes when a record changes, and a restart reloads the same root.
+* **Activation and root.** The seven payload types are rejected below `V`. After the first block of `V`, a block of a
+  lower version is invalid, even when the support of the committee falls. The first block of `V` has the extended
+  root, with an asset tree that holds only the header (`FreeHead` at `NoRecord`, `DepositTotal` 0). The root changes
+  when a record changes, and a restart reloads the same root.
 * **Create.** A fixed asset, a minting asset and an asset with `InitialSupply == 0` are created. Rejected: an empty
   symbol, 13 bytes, lowercase, a symbol of `PAC`, `Decimals` 10, `MaxSupply` 0 or above `MaxAssetSupply`,
   `InitialSupply` above `MaxSupply`, insufficient PAC, a treasury or validator `From`. `AssetCharge` reaches the
@@ -933,8 +943,8 @@ of balances that were open at the same time, each with its deposit locked at tha
 for the length of the tree as well as for the balances in use. Closing does not shorten the tree: the slots stay as
 free records of 5 bytes until the next balances take them. To lengthen the tree for good, an attacker must keep a
 deposit locked for every slot until the last one is open, and pay two fees per slot, one to open it and one to close
-it. At the cap, 200 openings per block add 8.4 KB per block, about 73 MB a day, for 17 280 PAC a day in fees, with 172
-800 PAC locked by the end of the day and returned afterwards. The opening fee alone is 2.3 times the price per byte,
+it. At the cap, 200 openings per block add 8.4 KB per block, about 73 MB a day, for 17 280 PAC a day in fees, with
+172 800 PAC locked by the end of the day and returned afterwards. The opening fee alone is 2.3 times the price per byte,
 and 8 times the price per record, of the accounts that `BatchTransfer` creates today (0.01 PAC for 8 accounts of 12
 bytes), which Pactus already accepts with no deposit at all.
 
@@ -948,11 +958,11 @@ would cost about 215 million PAC, five times the supply. `AssetCharge`, `Holding
 a later version can change.
 
 A proposer is the one attacker that the fee cannot price out. The fixed fee is a rule of the pools, not of consensus,
-which accepts any fee from 0 to `MaxNanoPAC`, and the fees of a block go to its proposer. A proposer therefore pays no
-fee, in net, for the asset transactions that it puts in its own blocks, as it pays none today for its own
-`BatchTransfer`. It still pays `AssetCharge` for every asset, which goes to the treasury and never back to it, it
-still locks a deposit for every balance, and it still cannot exceed `MaxAssetTxPerBlock` per block, so the bounds
-above hold for a proposer too; only the figures in fees drop, and only in its own blocks.
+which accepts any fee from 0 to `MaxNanoPAC`, and the fees of a block go to its proposer, or to the owner of its
+stake. A proposer therefore pays no fee, in net, for the asset transactions that it puts in its own blocks, as it pays
+none today for its own `BatchTransfer`. It still pays `AssetCharge` for every asset, which goes to the treasury and
+never back to it, it still locks a deposit for every balance, and it still cannot exceed `MaxAssetTxPerBlock` per
+block, so the bounds above hold for a proposer too; only the figures in fees drop, and only in its own blocks.
 
 An account that accepts an asset by mistake closes the balance and gets its deposit back, less a fee. It cannot refuse
 units that a holder sends it, but a close with a `MaxBurn` above those units goes through anyway, so dust cannot keep
