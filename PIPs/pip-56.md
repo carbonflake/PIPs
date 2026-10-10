@@ -46,6 +46,8 @@ and never see a bundle. A bundle is itself a transaction, unsigned like the one 
 format of a block does not change. A bundle takes one slot of the block, so the `MaxAssetTxPerBlock` (200) asset
 transactions that a block may carry use at most 25 of its 1 000 slots, and PAC always keeps the rest. A balance is
 paid for with a deposit that is returned when it is closed; an asset record, which is permanent, is paid for once.
+This PIP has no exchange, but it leaves room for one: section 6 reserves what a later PIP on liquidity pools needs, so
+that such a PIP changes nothing here.
 
 ## Motivation
 
@@ -64,7 +66,8 @@ This PIP keeps the design as small as the problem allows, in the spirit of Pactu
   by a constant, not by a market.
 
 The commands are few: create, accept, close, transfer, mint, and set a rate. Exchanges, allowances, lending, oracles,
-governance, freezing, clawback and metadata updates are outside this PIP.
+governance, freezing, clawback and metadata updates are outside this PIP; section 6 leaves room for a later PIP on
+exchanges and liquidity pools.
 
 ## Specification
 
@@ -102,13 +105,15 @@ and a later version may change them ([PIP-51](./pip-51.md)). A change never alte
 A new Merkle tree, `assetMerkle`, is built exactly like `accountMerkle`: leaf `i` is the hash of record `i`, and a new
 record is appended at the next index. The tree never shrinks and an `AssetRecord` never moves, so an `AssetID` never
 changes meaning. A holding can be replaced, though: a balance that its owner closes becomes a free slot, and the next
-balance reuses it. There are four kinds of record: a header at index 0, assets, balances (called holdings) and free
-slots. `NoRecord` is the value `0xFFFFFFFF`. The tree holds at most 2^31 records, at indexes 0 to 2^31 - 1, because the
-leaf index of the trees of the node is an `int32`; `NoRecord` is therefore never an index, and a payload that would
-append a record to a full tree is invalid. The deposits and `AssetCharge` keep the tree far below this bound (Security
-Considerations). Index 0 is the header, so no `AssetID` is 0. The root depends only on the records: a node that
-rebuilds the tree from its store, in whatever order it reads the records, MUST obtain the same root as a node that
-built it block by block, at every size up to this bound.
+balance reuses it. This PIP defines four kinds of record: a header at index 0, assets, balances (called holdings) and
+free slots; the other kinds are reserved for later PIPs (section 6). `NoRecord` is the value `0xFFFFFFFF`. The tree
+holds at most 2^31 records, at indexes 0 to 2^31 - 1, because the leaf index of the trees of the node is an `int32`;
+`NoRecord` is therefore never an index, and a payload that would append a record to a full tree is invalid. The
+deposits and `AssetCharge` keep the tree far below this bound (Security Considerations). Index 0 is the header, so no
+`AssetID` is 0, and the `BasicCheck` of every payload of this PIP that names an asset rejects an `AssetID` of 0
+(section 6 reserves it for PAC). The root depends only on the records: a node that rebuilds the tree from its store,
+in whatever order it reads the records, MUST obtain the same root as a node that built it block by block, at every
+size up to this bound.
 
 `HeaderRecord` (kind `0`), 13 bytes, at index 0 from the first block of version `V`:
 
@@ -163,13 +168,14 @@ behaves as if both rates were 0.
 | `Next` | `uint32` | Index of the next free slot, or `NoRecord` |
 
 The `AssetID` of an asset is the index of its `AssetRecord`. A record is hashed over its encoding, `Hash(Bytes)`. No
-record has an encoding of 64 bytes, the length of a pair of hashes (a header has 13 bytes, a free slot 5, a
-`HoldingRecord` 42 and an `AssetRecord` 82 to 134), so a leaf can never be taken for an inner node of the tree. There
-is at most one `HoldingRecord` for a given `(AssetID, Owner)`. Only `AssetCreate` (for its signer, the creator) and
-`AssetAccept` (for its signer) place one, so the signature of its owner is always behind a record. `AssetTransfer` and
-`AssetMint` never place a record: they need the recipient's record to exist. Only `AssetClose` removes one, and only
-for its owner. A node keeps a local index from `(AssetID, Owner)` to the record index. The index is not consensus state
-and can be rebuilt from the tree.
+record of any kind, in this PIP or a later one, has an encoding of 64 bytes, the length of a pair of hashes (a header
+has 13 bytes, a free slot 5, a `HoldingRecord` 42 and an `AssetRecord` 82 to 134), so a leaf can never be taken for an
+inner node of the tree. There is at most one `HoldingRecord` for a given `(AssetID, Owner)`. In this PIP, only
+`AssetCreate` (for its signer, the creator) and `AssetAccept` (for its signer) place one, and a later PIP places one
+only for the account that signs (section 6), so the signature of its owner is always behind a record. `AssetTransfer`
+and `AssetMint` never place a record: they need the recipient's record to exist. Only `AssetClose` removes one, and
+only for its owner. A node keeps a local index from `(AssetID, Owner)` to the record index. The index is not consensus
+state and can be rebuilt from the tree.
 
 **Free slots.** The free slots form a stack: `FreeHead` is the slot freed last, and the `Next` of each slot is the
 slot freed before it. When a holding is placed, it takes the slot at `FreeHead` if there is one, and `FreeHead` becomes
@@ -199,17 +205,17 @@ with different balances. It is persisted in the same store batch as accounts and
 After every transaction, for every asset:
 
 * `0 <= Burned <= Issued <= MaxSupply <= MaxAssetSupply`;
-* the sum of its holdings equals `Issued - Burned`;
-* `Issued` and `Burned` never decrease.
+* the units held by its records equal `Issued - Burned`: in this PIP, the sum of its holdings;
+* `Issued` and `Burned` never decrease, for an asset created by `AssetCreate` (section 6).
 
 And for the tree:
 
-* a holding is placed only by `AssetCreate` and `AssetAccept`, and only for the account that signed, and removed only
-  by `AssetClose`, for its owner, after burning what is left of its balance, so a transfer or a mint never changes the
-  number of records or the PAC locked, and nobody holds a record that it did not sign for;
+* a holding is placed only by a payload that its owner signs (in this PIP, `AssetCreate` and `AssetAccept`), and
+  removed only by `AssetClose`, for its owner, after burning what is left of its balance, so a transfer or a mint
+  never changes the number of records or the PAC locked, and nobody holds a record that it did not sign for;
 * the `Deposit` of the holdings add up to `DepositTotal`, and the PAC that accounts have lost to deposits is exactly
-  `DepositTotal`: balances, stake, treasury and `DepositTotal` are conserved by every asset transaction, the fee being
-  paid where the fee of any other transaction goes;
+  `DepositTotal`: balances, stake, treasury and the PAC totals of the header (`DepositTotal` in this PIP) are
+  conserved by every asset transaction, the fee being paid where the fee of any other transaction goes;
 * the free slots, followed from `FreeHead` by `Next`, are exactly the records of kind 3, each reached once, and the
   chain ends with `NoRecord`; the header is the only record of kind 0, at index 0.
 
@@ -242,8 +248,8 @@ TypeAssetBundle   = Type(14)
 * `Value()` is the PAC that the payload takes from `From` besides the fee (section 3.5): a charge that goes to the
   treasury, a deposit that is locked, or both. It is computed from the payload and the constants of section 1, without
   reading the state, and subtracted from `From` together with the fee. Every sum that involves `Value()`, the fee, a
-  deposit or a balance MUST be rejected before it exceeds `MaxNanoPAC` ([PIP-54](./pip-54.md)). `AssetClose` is the
-  one payload that gives PAC back to `From`.
+  deposit or a balance MUST be rejected before it exceeds `MaxNanoPAC` ([PIP-54](./pip-54.md)). In this PIP,
+  `AssetClose` is the one payload that gives PAC back to `From`.
 * Every asset quantity is an `int64` with `1 <= quantity <= MaxAssetSupply`, except the `InitialSupply` of
   `AssetCreate` and the `MaxBurn` of `AssetClose`, which may be 0. A sum of quantities MUST be checked before it is
   added, in the form `total > MaxAssetSupply - amount`.
@@ -382,8 +388,8 @@ wallet knows it before it signs and nothing depends on the state:
 | `AssetClose` | 0. The deposit comes back, less the fee (section 3.8) |
 | `AssetTransfer`, `AssetMint`, `AssetSetRate` | 0 |
 
-Only creation and acceptance place records, so only they take PAC, and each record is paid for by the account that
-signed for it. A charge or a deposit is always for a record that is in fact placed.
+In this PIP, only creation and acceptance place records, so only they take PAC, and each record is paid for by the
+account that signed for it. A charge or a deposit is always for a record that is in fact placed.
 
 **Where the PAC goes.** This PIP changes nothing about the fee. Every asset transaction pays it exactly as a
 `Transfer` does, and it goes wherever the fee of any other transaction goes, whatever that path is or becomes: today,
@@ -391,9 +397,10 @@ the subsidy transaction pays the fees of a block, with the block reward, to its 
 [PIP-49](./pip-49.md) delegation, possibly to the owner of its stake). Only `AssetCharge` is explicitly credited to
 the treasury, and never to the proposer, so that a validator cannot refund the cost of the assets it creates itself. A
 deposit is not paid to anyone: it is locked, and it comes back to the account that posted it, never to a proposer.
-Explorers that audit the supply MUST count `DepositTotal` next to balances and stake, as they count the locked deposit
-of an anchor ([PIP-50](./pip-50.md)); leaving it out looks like a burn. The rates of section 3.3 are a different
-thing: they are quantities of the asset, set by its issuer, and PAC is not involved.
+Explorers that audit the supply MUST count `DepositTotal`, and any PAC total that a later version adds to the header
+(section 6), next to balances and stake, as they count the locked deposit of an anchor ([PIP-50](./pip-50.md));
+leaving it out looks like a burn. The rates of section 3.3 are a different thing: they are quantities of the asset,
+set by its issuer, and PAC is not involved.
 
 #### 3.6 `AssetSetRate` (type 11)
 
@@ -505,13 +512,14 @@ The transaction that carries this payload is built like the subsidy transaction:
 signature and no public key, its fee is 0, its memo is empty, and its lock time is the height of the block. A bundle
 has no signer, and its `Value()` is 0. The node identifies it by its payload type and MUST NOT take it for the subsidy
 transaction, which the node recognizes by its signer, the treasury. A decoder reads the payload type of each item
-before its payload and rejects at once any type other than the six asset types, so bundles never nest, not even while
-a block is being decoded.
+before its payload and rejects at once any type that is not the type of an asset transaction, so bundles never nest,
+not even while a block is being decoded.
 
 These rules are consensus rules:
 
-1. In a block, asset transactions (the six types of section 3) appear only as items of bundles, never as entries of
-   the list on their own. The first entry of the list stays the subsidy transaction, so a bundle is never first.
+1. In a block, asset transactions, of the six types of section 3 and of the types that later PIPs add to the asset
+   layer (section 6), appear only as items of bundles, never as entries of the list on their own. The first entry of
+   the list stays the subsidy transaction, so a bundle is never first.
 2. A bundle holds 1 to `MaxBundleItems` items, and each item is an asset transaction: never a PAC transaction and
    never another bundle. Its envelope is exactly as above: unsigned, with a fee of 0, an empty memo and the height of
    the block as lock time.
@@ -592,9 +600,9 @@ and this work from a block.
   asset transactions, and a bundle exists only inside a block. A pool MUST reject a bundle, removes the items of a
   committed bundle as it removes any committed transaction, and counts each item against its own signer wherever it
   keeps accounts per signer.
-* Transaction pool: a pool is local policy, not consensus. Implementations SHOULD give the six types their own pool,
-  as each payload type has one today, so asset transactions cannot crowd out payments and payments cannot evict them,
-  and SHOULD let it hold at least `MaxAssetTxPerBlock` transactions (20 % of the default `MaxSize` of 1 000): a
+* Transaction pool: a pool is local policy, not consensus. Implementations SHOULD give asset transactions their own
+  pool, as each payload type has one today, so asset transactions cannot crowd out payments and payments cannot evict
+  them, and SHOULD let it hold at least `MaxAssetTxPerBlock` transactions (20 % of the default `MaxSize` of 1 000): a
   proposer builds its block from its pool, and a smaller pool could not fill the cap. Fee estimation (`CalculateFee`)
   gives the same fixed fee as for a `Transfer`, and a wallet adds `Value()` to show the total PAC that a transaction
   takes. A pool MAY drop an `AssetTransfer` or `AssetMint` whose recipient has not accepted the asset, and an
@@ -607,19 +615,58 @@ and this work from a block.
   state while all together are not (several transfers of the same units), and without a limit one funded account can
   fill the pool with transactions that the proposer will skip.
 * RPC (mandatory for the official node, on every surface it ships): payload type values `8` to `14` in `PayloadType`;
-  `GetRaw*Transaction` builders for the six payloads; `GetAssetState`, returning `DepositTotal`, `FreeHead` and the
-  number of records of the tree; `GetAsset`, returning the fields of section 2.1, the policy with its current rates
-  and bounds and whether its collector has accepted it (an asset whose team rate is above 0 cannot be transferred
-  before), and the live supply `Issued - Burned`; and `GetAssetBalance(AssetID, Address)`, which tells an account that
-  has not accepted the asset, or has closed it, from one that holds a balance of 0, so that a sender can check before
-  it signs. A node SHOULD also offer a list of the balances of an address from its local index. `GetBlock` and
-  `GetTransaction` return the items of a bundle as ordinary transactions, so a wallet or an explorer does not need to
-  know about bundles; they MAY also report the bundle of each item.
-* Explorers that audit the supply MUST add `DepositTotal` to balances, stake and the treasury: the PAC locked by
-  deposits belongs to no account, and leaving it out looks like a burn. `AssetCharge` goes to the treasury, and every
-  other PAC amount keeps its place.
+  `GetRaw*Transaction` builders for the six payloads; `GetAssetState`, returning the fields of the header (`FreeHead`,
+  `DepositTotal` and any total that a later version adds) and the number of records of the tree; `GetAsset`, returning
+  the fields of section 2.1, the policy with its current rates and bounds and whether its collector has accepted it
+  (an asset whose team rate is above 0 cannot be transferred before), and the live supply `Issued - Burned`; and
+  `GetAssetBalance(AssetID, Address)`, which tells an account that has not accepted the asset, or has closed it, from
+  one that holds a balance of 0, so that a sender can check before it signs. A node SHOULD also offer a list of the
+  balances of an address from its local index. `GetBlock` and `GetTransaction` return the items of a bundle as
+  ordinary transactions, so a wallet or an explorer does not need to know about bundles; they MAY also report the
+  bundle of each item.
+* Explorers that audit the supply MUST add `DepositTotal`, and any PAC total that a later version adds to the header,
+  to balances, stake and the treasury: that PAC belongs to no account, and leaving it out looks like a burn.
+  `AssetCharge` goes to the treasury, and every other PAC amount keeps its place.
 
-### 6. Conventions (informative)
+### 6. Room for later PIPs
+
+This PIP has no exchange. A later PIP, for example one for liquidity pools in the style of PancakeSwap v2, adds
+payloads and records to the asset layer. The rules below let it do so without changing any record, payload or
+invariant of this PIP. The values that they reserve are invalid in this PIP and cost nothing.
+
+1. **Asset transactions.** An asset transaction is a transaction whose payload type belongs to the asset layer: the
+   six of section 3, and those that a later PIP adds to the layer. All of them follow section 4: they travel only as
+   items of bundles and count in `MaxAssetTxPerBlock`. A later PIP may give its own payloads a lower cap inside
+   `MaxAssetTxPerBlock`, so that they cannot crowd out transfers.
+2. **Records.** Record kinds 4 to 255 are reserved for later PIPs, and no payload of this PIP creates one. Records of
+   every kind live in the asset tree, under its root. Only holdings take free slots: a record of any other kind is
+   appended and never moves, so that its index can serve as its identity, as the `AssetID` does. No record of any kind
+   has an encoding of 64 bytes.
+3. **Units outside holdings.** A later PIP may define records that hold units of an asset, such as the reserves of a
+   pool. The invariant of section 2.3 counts them: the units held by all the records of an asset equal its
+   `Issued - Burned`.
+4. **PAC outside accounts.** A later PIP may define records that hold PAC, such as the PAC side of a pool. It then
+   appends a total of that PAC to the header, as `DepositTotal` is the total of the deposits. A later version may
+   append fields to the header in this way, and rewrites the header in the longer encoding at its first block. Every
+   PAC total of the header belongs to no account, and the conservation of section 2.3 and the supply audits of
+   sections 3.5 and 5 count them all.
+5. **PAC in a pair.** No asset has the `AssetID` 0, and every payload of this PIP rejects it. A later PIP may use the
+   `AssetID` 0 to name PAC, for example in a pair or a path of swaps.
+6. **Assets without an issuer.** `AssetCreate` always sets an account as `Issuer`, so no asset of this PIP has the
+   zero address as `Issuer`. A later PIP may create such assets, for example the shares of a pool. No `AssetMint` or
+   `AssetSetRate` can ever pass for them, since `From` is never the treasury, and the PIP that creates them defines
+   how their `Issued` and `Burned` move, as long as the first two invariants of section 2.3 hold: the bounds, and the
+   conservation of units. The third invariant and the cap on `Issued` of section 3.4 are promises of the issuer of an
+   asset created by `AssetCreate`.
+7. **Signatures, opt-in and charges.** The payloads of a later PIP follow section 3.1. They credit units only to a
+   holding that its owner opened or to records of their own PIP, they place a holding only for the account that
+   signs, with `HoldingDeposit`, and they compute `Value()` from the payload and the constants, never from the state.
+   The opt-in of this PIP and its rules on charges therefore stay true.
+8. **Rates.** A payload that moves units between a holding and another record applies to them the split of section
+   3.3, bounded by a `MaxRate` that the owner of the holding signs, or its PIP says why it does not. As in section
+   3.3, no team share is paid while the collector has not accepted the asset.
+
+### 7. Conventions (informative)
 
 Nothing here is checked by consensus. Wallets and explorers agree on it so that one record can serve several uses.
 
@@ -747,6 +794,13 @@ never has to guess a fee from the state, and no fee code depends on the state. B
 place records, and which records they place follows from the payload, each charge or deposit is for a record that is
 in fact placed.
 
+**Room for pools, but no pools.** Exchanges are where token chains lose the most: price manipulation, sandwiches,
+inflated first shares, honeypots. They deserve a PIP of their own, reviewed on its own. This PIP only reserves what
+such a PIP needs (section 6): kinds of record, a header that can grow, the `AssetID` 0 for PAC, assets without an
+issuer for the shares of a pool, and the rule that every payload of the asset layer travels in bundles under the same
+cap. These reservations cost no byte and no rule today, and a pool PIP then changes nothing in the records, payloads
+or invariants of this one.
+
 **PAC pays everything.** No second fee token and no sponsor. A new holder needs a little PAC for the deposit and the
 fee to accept an asset, and for the fee to move it.
 
@@ -819,8 +873,8 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   even when there is a free slot. With a policy, rejected: `Current` outside `[Min, Max]`, a `Max` above 10 000,
   `TeamRate.Max + BurnRate.Max` above 10 000, all `Max` at 0, `TeamCap` of 0, a validator `Collector`. With a policy
   that names the creator as collector, the creator's holding exists right after creation, at balance 0 if
-  `InitialSupply` is 0, and is placed once. With a policy that names another account as collector, no record is
-  placed for that account, and its PAC balance is unchanged.
+  `InitialSupply` is 0, and is placed once. With a policy that names another account as collector, no record is placed
+  for that account, and its PAC balance is unchanged.
 * **Accept.** An account accepts an asset: a holding with balance 0 is placed, `HoldingDeposit` leaves its PAC balance
   and raises `DepositTotal`, nothing reaches the treasury, and the account can then receive. With no free slot the
   record is appended at the next index; with one, it takes the slot at `FreeHead`. Rejected: an unknown asset, a second
@@ -899,6 +953,10 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   a block with 26 bundles or 201 items is rejected before the signature of any item is verified. An asset transaction
   whose `From` is the treasury address is rejected by `BasicCheck` without a signature, by the pool, and as an item of
   a bundle, and the balance of the treasury does not change.
+* **Room for later PIPs.** Every payload that names an asset rejects an `AssetID` of 0 in `BasicCheck`. No
+  `AssetCreate` gives an asset the zero address as `Issuer`, and `AssetMint` and `AssetSetRate` never pass with the
+  treasury as `From`. No payload of this PIP creates a record of kind 4 or more. The header has 13 bytes, and the
+  conservation of section 2.3 counts every PAC total of the header.
 
 ## Reference Implementation
 
@@ -999,9 +1057,9 @@ rates, and whether a rate is variable, before the user buys the asset, SHOULD wa
 and MUST set `MaxRate` on every transfer it builds to the rate it showed, never to the `Max` of the asset unless the
 user asks for it. A rate change that lands between signing and inclusion cannot take more than `MaxRate`. A collector
 that is the issuer, or a key that the issuer controls, receives the team share without any further rule, so users
-judge the asset by the issuer, not by the symbol. The shares round down, so many small transfers can avoid a rate; this
-costs the issuer revenue and nobody else anything. A transfer rate does not apply to a mint or to a burn. A later PIP
-for exchanges MUST say how an atomic swap treats the rates of the assets that it moves.
+judge the asset by the issuer, not by the symbol. The shares round down, so many small transfers can avoid a rate;
+this costs the issuer revenue and nobody else anything. A transfer rate does not apply to a mint or to a burn. A later
+PIP for exchanges or pools follows section 6 on rates.
 
 An issuer that names a collector that cannot accept, for instance a mistyped address, makes the asset untransferable for
 every holder, burns included, as long as `TeamRate.Current` is above 0 and that collector has not accepted, and the
@@ -1067,7 +1125,9 @@ Balances and transfers are public, as for PAC. This PIP adds no privacy.
 * **A separate rate controller,** for example a multi-signature or a vote, and a delay before a new rate applies.
 * **Removal of assets that nobody holds,** which needs a count of the holdings of each asset, to bound the permanent
   part of the state too.
-* **An atomic swap payload,** so that two parties can exchange assets or an asset and PAC in one transaction.
+* **Exchanges,** in dedicated PIPs that use the room of section 6: an atomic swap, so that two parties can exchange
+  assets or an asset and PAC in one transaction, and liquidity pools with a constant product, in the style of
+  PancakeSwap v2.
 * **An off-chain layer** with its own accountability, if asset demand outgrows `MaxAssetTxPerBlock`.
 
 ## Copyright
