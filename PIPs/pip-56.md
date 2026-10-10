@@ -795,22 +795,22 @@ power supports it, proposers raise the block version; from the first block of ve
 the asset tree exists with its header record, and the seven types are legal, so a block may carry bundles. Before that
 block the seven types MUST be rejected as invalid payload types, and the asset tree does not exist; the decoder of a
 node does not know the version of a block, so this rejection is a check of block validation and of the pools. The
-activation cannot be undone: today a proposer may return to a lower block version when the support of the committee
-falls, and validation accepts any version from the one of genesis, except that blocks above height 8 000 000 must have
-version 4 or higher. For this PIP, once a block of version `V` is committed, a block of a lower version is invalid,
-and a proposer proposes version `V` or higher; a node knows it from its state, since the asset tree exists. The format
-of a block does not change, but software that walks the transactions of a block (explorers, indexers, light clients)
-must learn to open a bundle. State sync and snapshots MUST carry the asset tree from then on. Testnet SHOULD activate
-first.
+activation cannot be undone, and the node already guarantees it: when it commits a block of a higher version, it
+raises the lowest version that it accepts to that version, restores it from the last block after a restart, and from
+then on rejects any block of a lower version and proposes that version or higher. Once a block of version `V` is
+committed, a block of a lower version is therefore invalid, and the existence of the asset tree says the same in the
+state. The format of a block does not change, but software that walks the transactions of a block (explorers,
+indexers, light clients) must learn to open a bundle. State sync and snapshots MUST carry the asset tree from then on.
+Testnet SHOULD activate first.
 
 ## Test Cases
 
 Implementations MUST pass at least these. They add no rule to the Specification.
 
 * **Activation and root.** The seven payload types are rejected below `V`. After the first block of `V`, a block of a
-  lower version is invalid, even when the support of the committee falls. The first block of `V` has the extended
-  root, with an asset tree that holds only the header (`FreeHead` at `NoRecord`, `DepositTotal` 0). The root changes
-  when a record changes, and a restart reloads the same root.
+  lower version is invalid, even after a restart or when the support of the committee falls. The first block of `V`
+  has the extended root, with an asset tree that holds only the header (`FreeHead` at `NoRecord`, `DepositTotal` 0).
+  The root changes when a record changes, and a restart reloads the same root.
 * **Create.** A fixed asset, a minting asset and an asset with `InitialSupply == 0` are created. Rejected: an empty
   symbol, 13 bytes, lowercase, a symbol of `PAC`, `Decimals` 10, `MaxSupply` 0 or above `MaxAssetSupply`,
   `InitialSupply` above `MaxSupply`, insufficient PAC, a treasury or validator `From`. `AssetCharge` reaches the
