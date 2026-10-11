@@ -7,7 +7,7 @@ status: Draft
 type: Standards Track
 category: Core
 created: 2026-10-02
-updated: 2026-10-10
+updated: 2026-10-11
 requires: 39, 51, 54
 ---
 
@@ -65,8 +65,8 @@ This PIP keeps the design as small as the problem allows, in the spirit of Pactu
   is trusted. Nothing depends on an operator, an indexer or an off-chain data store. The new rules are consensus code,
   though, and a bug in them can harm the whole chain, as [PIP-54](./pip-54.md) showed: hence the bounds, the tests,
   and the testnet plan that mainnet waits for (Reference Implementation).
-* **Light.** No per-block hook, no signature scheme, no epoch, no registry. The load that assets put on L1 is bounded
-  by a constant, not by a market.
+* **Light.** No per-block hook, no new signature scheme, no epoch, no registry. The load that assets put on L1 is
+  bounded by a constant, not by a market.
 
 The commands are few: create, accept, close, transfer, mint, and set a rate. Exchanges, allowances, lending, oracles,
 governance, freezing, clawback and metadata updates are outside this PIP; section 6 leaves room for a later PIP on
@@ -162,7 +162,7 @@ behaves as if both rates were 0.
 | `AssetID` | `uint32` | The index of the `AssetRecord` |
 | `Owner` | `Address` | An account address |
 | `Balance` | `int64` | Units held, `0 <= Balance <= MaxSupply` of the asset. May be zero |
-| `Deposit` | `int64` | The PAC locked when the record was placed. `AssetClose` returns exactly this amount |
+| `Deposit` | `int64` | The PAC locked when the record was placed. `AssetClose` returns exactly this amount, out of which the close pays its fee |
 
 `FreeRecord` (kind `3`), 5 bytes, the place of a closed holding:
 
@@ -985,9 +985,9 @@ below, with the results published. Each step tests a failure, not only the path 
 3. **Activation.** The switch to version `V` under [PIP-51](./pip-51.md), with and without enough support, and the
    floor of the block version: after the first block of `V`, no block of a lower version is accepted, even after a
    restart.
-4. **Hostile proposers and peers.** Blocks with half-empty, nested or oversized bundles, repeated transaction IDs,
-   asset transactions signed by the treasury, or 1 000 bundles of 8 items are rejected, and rejecting them costs no
-   more than reading them. Every pool drops a bundle that is gossiped to it.
+4. **Hostile proposers and peers.** Blocks with two partial bundles, nested or oversized bundles, repeated transaction
+   IDs, asset transactions signed by the treasury, or 1 000 bundles of 8 items are rejected, and rejecting them costs
+   no more than reading them. Every pool drops a bundle that is gossiped to it.
 5. **Pools under flood.** A flood of asset transactions that are valid alone and invalid together, with the
    per-sender limit on: payments keep flowing, and the asset lane recovers when the flood stops.
 6. **State over time.** Weeks of mixed traffic, with accepts, closes and creations at the cap: the size of the store,
