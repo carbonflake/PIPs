@@ -161,7 +161,7 @@ behaves as if both rates were 0.
 | `Owner` | `Address` | An account address |
 | `Balance` | `int64` | Units held, `0 <= Balance <= MaxSupply` of the asset. May be zero |
 | `Deposit` | `int64` | The PAC locked when the record was placed. `AssetClose` returns exactly this amount, out of which the close pays its fee |
-| `LockedUntil` | `uint32` | The `Expiry` of the acceptance that placed the record (section 3.9), or 0. `AssetClose` is invalid up to this height |
+| `LockedUntil` | `uint32` | The `Expiry` of the acceptance that placed the record (section 3.9), or 0. An `AssetClose` of the holding is valid only if `h > LockedUntil`, `h` being the height of the block |
 
 `FreeRecord` (kind `3`), 5 bytes, the place of a closed holding:
 
@@ -229,9 +229,9 @@ After every transaction, for every asset:
 And for the tree:
 
 * a holding is placed only with the signature of its owner (in this PIP, by `AssetCreate`, `AssetAccept`, or
-  `AssetAcceptFor`, which carries it), and removed only by `AssetClose`, for its owner, once its `LockedUntil` has
-  passed and after burning what is left of its balance, so a transfer or a mint never changes the number of records or
-  the PAC locked, and nobody holds a record that it did not sign for;
+  `AssetAcceptFor`, which carries it), and removed only by `AssetClose`, for its owner, at a height `h > LockedUntil`
+  and after burning what is left of its balance, so a transfer or a mint never changes the number of records or the
+  PAC locked, and nobody holds a record that it did not sign for;
 * the `Deposit` of the holdings add up to `DepositTotal`, and the PAC that accounts have lost to deposits is exactly
   `DepositTotal`: balances, stake, treasury and the PAC totals of the header (`DepositTotal` in this PIP) are
   conserved by every asset transaction, the fee being paid where the fee of any other transaction goes;
@@ -487,14 +487,14 @@ asks its user, then signs an `AssetAccept`, or an acceptance that a sponsor subm
 | `AssetID` | `uint32` | |
 | `MaxBurn` | *varint* `int64` | Most units that the owner agrees to burn with the close. `0 <= MaxBurn <= MaxAssetSupply` |
 
-`Value()` is 0. `Check`: the asset exists; `From` has a holding of the asset with at most `MaxBurn` units, whose
-`LockedUntil` is below the height `h` of the block; the asset does not have a policy whose `Collector` is `From` while
-`TeamRate.Current` is above 0; and, with `Deposit` the amount posted in the record, `PAC(From) + Deposit >= fee` and
-`PAC(From) <= MaxNanoPAC - Deposit + fee`, which has no negative step ([PIP-54](./pip-54.md)). `Execute`: add the
-units of the holding to the `Burned` of the asset, with no rate, as for a transfer to the zero address; set
-`PAC(From)` to `PAC(From) + Deposit - fee`; subtract `Deposit` from `DepositTotal`; turn the record into a
-`FreeRecord` and push it on the free stack (section 2.1). The units that were burned are gone with the record, so the
-sum of the holdings still equals `Issued - Burned`.
+`Value()` is 0. `Check`: the asset exists; `From` has a holding of the asset with at most `MaxBurn` units;
+`h > LockedUntil`, where `h` is the height of the block and `LockedUntil` that of the holding; the asset does not have
+a policy whose `Collector` is `From` while `TeamRate.Current` is above 0; and, with `Deposit` the amount posted in the
+record, `PAC(From) + Deposit >= fee` and `PAC(From) <= MaxNanoPAC - Deposit + fee`, which has no negative step
+([PIP-54](./pip-54.md)). `Execute`: add the units of the holding to the `Burned` of the asset, with no rate, as for a
+transfer to the zero address; set `PAC(From)` to `PAC(From) + Deposit - fee`; subtract `Deposit` from `DepositTotal`;
+turn the record into a `FreeRecord` and push it on the free stack (section 2.1). The units that were burned are gone
+with the record, so the sum of the holdings still equals `Issued - Burned`.
 
 The fee is taken from the refund, so that an account that has locked all its PAC can still close, as with the deposit
 of an anchor in [PIP-50](./pip-50.md). The refund is the `Deposit` recorded when the holding was placed, not the
@@ -514,9 +514,9 @@ team share into that balance (section 2.3). When the team rate is 0 it may close
 the rate again until it has accepted the asset again (section 3.6).
 
 A holding that a sponsored acceptance opened has the `Expiry` of that acceptance as `LockedUntil`, so its owner closes
-it only once the acceptance has expired, at most `TransactionToLiveInterval` blocks after it was opened: until then
-the acceptance could open it again (section 3.9). Every other holding has a `LockedUntil` of 0 and can be closed at
-once.
+it only from height `Expiry + 1`, once the acceptance has expired: until then the acceptance could open it again
+(section 3.9). Since `Expiry` is at most `TransactionToLiveInterval` blocks after the height at which the holding was
+opened, the lock lasts at most that long. Every other holding has a `LockedUntil` of 0 and can be closed at once.
 
 A closed slot is reused by the next holding that is placed, so closing and accepting again does not grow the tree.
 
@@ -566,13 +566,13 @@ An acceptance lets its owner receive units of one asset, and nothing else: it ne
 units or PAC of the owner. Anyone who sees an acceptance can submit it and pay for it, and the owner gets its holding
 either way.
 
-**An acceptance opens at most one holding.** The holding that it opens keeps its `Expiry` as `LockedUntil`, and
-`AssetClose` rejects that holding up to that height (section 3.8). As long as the acceptance is valid, the holding
-that it opened therefore exists, and a second `AssetAcceptFor` that carries it fails, since `Owner` already holds the
-asset, in the same block or a later one, whoever submits it and whatever signature it carries; once the holding can be
-closed, the acceptance has expired. A holding that its owner closed is therefore never opened again with the
-acceptance that opened it. The rule reads nothing but the asset tree: a node keeps no record of the acceptances that
-were used, and a restart, a snapshot or a sync changes nothing. Its price is that a sponsored holding can be closed
+**An acceptance opens at most one holding.** The holding that it opens keeps its `Expiry` as `LockedUntil`, and an
+`AssetClose` of that holding is valid only if `h > LockedUntil` (section 3.8). As long as the acceptance is valid, the
+holding that it opened therefore exists, and a second `AssetAcceptFor` that carries it fails, since `Owner` already
+holds the asset, in the same block or a later one, whoever submits it and whatever signature it carries; once the
+holding can be closed, the acceptance has expired. A holding that its owner closed is therefore never opened again
+with the acceptance that opened it. The rule reads nothing but the asset tree: a node keeps no record of past
+acceptances, and a restart, a snapshot or a sync changes nothing. Its price is that a sponsored holding can be closed
 only after its acceptance has expired, at most `TransactionToLiveInterval` blocks after it was opened, so a wallet
 SHOULD sign an acceptance with a short expiry, such as 360 blocks (one hour on mainnet), which is all the time that a
 sponsor needs. An acceptance that no included transaction carried has opened nothing, and stays valid until its
@@ -656,9 +656,9 @@ the next block, until its lock time expires, and the signer then signs it again.
   that has not accepted the asset, or has closed it, from one that holds a balance of 0, and returns the `LockedUntil`
   of a holding, so that a sender can check before it signs and an owner knows when it can close. A node SHOULD also
   offer a list of the balances of an address from its local index.
-* Wallet: the wallet of the node builds and signs an acceptance (section 3.9) only after showing the asset, its issuer
-  and the expiry, gives it a short expiry by default (360 blocks), and can submit an `AssetAcceptFor` for an
-  acceptance that it receives.
+* Wallet: the wallet of the node builds and signs an acceptance (section 3.9) only after showing the asset, its
+  issuer, the expiry and that the holding cannot be closed up to that height, gives it a short expiry by default (360
+  blocks), and can submit an `AssetAcceptFor` for an acceptance that it receives.
 * Explorers that audit the supply MUST add `DepositTotal`, and any PAC total that a later version adds to the header,
   to balances, stake and the treasury: that PAC belongs to no account, and leaving it out looks like a burn.
   `AssetCharge` goes to the treasury, and every other PAC amount keeps its place.
@@ -695,9 +695,9 @@ invariant of this PIP. The values that they reserve are invalid in this PIP and 
 7. **Signatures, opt-in and charges.** The payloads of a later PIP follow section 3.1. They credit units only to a
    holding that its owner opened or to records of their own PIP, they place a holding only with the signature of the
    account that will hold it, in a transaction or in an acceptance, with `HoldingDeposit` and, for an acceptance, its
-   `Expiry` as `LockedUntil` (section 3.9), they remove a holding only for its owner and never up to its
-   `LockedUntil`, and they compute `Value()` from the payload and the constants, never from the state. The opt-in of
-   this PIP and its rules on charges therefore stay true.
+   `Expiry` as `LockedUntil` (section 3.9), they remove a holding only for its owner and only at a height
+   `h > LockedUntil`, and they compute `Value()` from the payload and the constants, never from the state. The opt-in
+   of this PIP and its rules on charges therefore stay true.
 8. **Rates.** A payload that moves units between a holding and another record applies to them the split of section
    3.3, bounded by a `MaxRate` that the owner of the holding signs, or its PIP says why it does not. The team share
    goes to the holding of the collector, which exists whenever the team rate is above 0 (section 2.3).
@@ -951,26 +951,28 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   `TransactionToLiveInterval` blocks after the block, `Owner` equal to `From`, a treasury or validator `Owner`, an
   owner that already holds the asset, and a sponsor without enough PAC. The signature of a transaction does not verify
   as an acceptance, and an acceptance does not verify as a transaction. The holding that an acceptance opens has its
-  `Expiry` as `LockedUntil`: its owner cannot close it up to that height, and closes it after. An acceptance opens at
-  most one holding: a second `AssetAcceptFor` with the same acceptance fails in the same block (an `AssetAcceptFor`,
-  an `AssetClose` that is rejected, then the same acceptance again) and in every later block, with another valid
-  signature of the same message too, and the same holds after a restart of the node, a start from a snapshot or a
-  sync. An acceptance whose `AssetAcceptFor` was rejected before inclusion, for example because the owner already held
-  the asset, can still be used before its expiry, and once the holding is closed, a new acceptance with a later
-  `Expiry` opens a holding again.
+  `Expiry` as `LockedUntil`, and the boundary is exact: for an acceptance with `Expiry = H` included at height `H`, an
+  `AssetClose` of the holding at `H` is rejected and at `H + 1` is valid, and an `AssetAcceptFor` that carries the
+  same acceptance at `H + 1` is rejected as expired. An acceptance opens at most one holding: a second
+  `AssetAcceptFor` with the same acceptance fails in the same block (an `AssetAcceptFor`, an `AssetClose` that is
+  rejected, then the same acceptance again) and in every later block, with another valid signature of the same message
+  too, and the same holds after a restart of the node, a start from a snapshot or a sync. An acceptance whose
+  `AssetAcceptFor` was rejected before inclusion, for example because the owner already held the asset, can still open
+  a holding before its expiry, and once the holding is closed, a new acceptance with a later `Expiry` opens a holding
+  again.
 * **Close and free slots.** An owner closes its holding: its PAC balance rises by the `Deposit` posted in the record,
   less the fee, `DepositTotal` falls by the same `Deposit`, and the record becomes a `FreeRecord` that is the new
   `FreeHead`. With `MaxBurn` at 0 the balance must be 0. With a `MaxBurn` at least the balance, the units are added to
   `Burned`, no rate applies, and the sum of the holdings still equals `Issued - Burned`. Rejected: an unknown asset,
-  an account with no holding, a balance above `MaxBurn` (even by one unit), another account's holding, a holding whose
-  `LockedUntil` is at or above the height of the block, the collector while `TeamRate.Current` is above 0, a `MaxBurn`
-  above `MaxAssetSupply`, and a refund that would take the PAC balance above `MaxNanoPAC`. An account with 0 PAC and a
-  deposit that covers the fee can close. A holding placed by `AssetCreate` or `AssetAccept` has a `LockedUntil` of 0
-  and can be closed at once. After two closes, two accepts take the slots in the reverse order of the closes, the tree
-  grows by no record, and `FreeHead` ends at `NoRecord`. A `HoldingDeposit` that a later version changes does not
-  alter the refund of an old record. A closed account that accepts again gets a record that is unrelated to the old
-  one. Units sent to an owner after it signed a close with `MaxBurn` at 0 make that close fail and cost the owner only
-  the new signature; the same close with a `MaxBurn` above the dust goes through and burns it.
+  an account with no holding, a balance above `MaxBurn` (even by one unit), another account's holding, a holding with
+  `h <= LockedUntil`, the collector while `TeamRate.Current` is above 0, a `MaxBurn` above `MaxAssetSupply`, and a
+  refund that would take the PAC balance above `MaxNanoPAC`. An account with 0 PAC and a deposit that covers the fee
+  can close. A holding placed by `AssetCreate` or `AssetAccept` has a `LockedUntil` of 0 and can be closed at once.
+  After two closes, two accepts take the slots in the reverse order of the closes, the tree grows by no record, and
+  `FreeHead` ends at `NoRecord`. A `HoldingDeposit` that a later version changes does not alter the refund of an old
+  record. A closed account that accepts again gets a record that is unrelated to the old one. Units sent to an owner
+  after it signed a close with `MaxBurn` at 0 make that close fail and cost the owner only the new signature; the same
+  close with a `MaxBurn` above the dust goes through and burns it.
 * **Transfer.** One recipient and eight succeed; nine fail. Rejected: a repeated `To`, `To == From`, a validator
   recipient, an amount of 0 or below, a `MaxRate` above 10 000, an unknown asset, a balance that is too small, a
   recipient that has not accepted the asset, and 8 recipients of `2^62` each (the overflow case of PIP-54), which
@@ -1044,14 +1046,15 @@ below, with the results published. Each step tests a failure, not only the path 
    signatures each. The time to validate and to commit them, on the smallest hardware that validators are expected to
    run, sets `MaxAssetTxPerBlock` with a wide margin under the block interval.
 2. **Restarts and snapshots.** Nodes restarted at random, nodes started from a snapshot and nodes synced from the
-   first block keep the state root of the others at every height and reject, as they do, an acceptance that was
-   already used; a dedicated test does the same with an asset tree of at least 50 million records (Test Cases).
+   first block keep the state root of the others at every height and, like them, reject the reuse of an acceptance,
+   before and after a restart or a snapshot; a dedicated test does the same with an asset tree of at least 50 million
+   records (Test Cases).
 3. **Activation.** The switch to version `V` under [PIP-51](./pip-51.md), with and without enough support, and the
    floor of the block version: after the first block of `V`, no block of a lower version is accepted, even after a
    restart.
 4. **Hostile proposers and peers.** Blocks with 101 or 999 asset transactions, asset transactions below `V`, repeated
-   transaction IDs, acceptances used twice, or asset transactions signed by the treasury are rejected, and rejecting a
-   block over the cap costs no more than reading it.
+   transaction IDs, the reuse of an acceptance, or asset transactions signed by the treasury are rejected, and
+   rejecting a block over the cap costs no more than reading it.
 5. **Pools under flood.** A flood of asset transactions that are valid alone and invalid together, with the
    per-sender limit on: payments keep flowing, and the asset lane recovers when the flood stops.
 6. **State over time.** Weeks of mixed traffic, with accepts, closes and creations at the cap: the size of the store,
@@ -1059,7 +1062,8 @@ below, with the results published. Each step tests a failure, not only the path 
    section 2.3 hold at every block.
 7. **Wallets and explorers.** The RPC of section 5 and the wallets show deposits as locked PAC, the net amount of a
    transfer with rates, the bounds of the rates, whether a collector has accepted, and the units that a close burns. A
-   wallet signs an acceptance only after showing its asset, its issuer and its expiry, which is short by default.
+   wallet signs an acceptance only after showing its asset, its issuer, its expiry, which is short by default, and
+   that the holding cannot be closed before that expiry.
 
 ### Open items of this draft
 
@@ -1192,8 +1196,8 @@ and amounts in the units of the asset that it reads from the state.
   transfer or the spending of anything. A user tricked into signing one gets, at worst, a holding that it did not
   want, paid for by someone else, which it can close, once the acceptance has expired, to keep the deposit; the
   acceptance never opens it again (section 3.9). A wallet MUST show the `AssetID`, the issuer and the expiry before it
-  signs an acceptance, as for an `AssetAccept`, and MUST build the bytes that it signs itself, never sign bytes that
-  an application hands it.
+  signs an acceptance, as for an `AssetAccept`, MUST say that the holding that the acceptance opens cannot be closed
+  up to that expiry, and MUST build the bytes that it signs itself, never sign bytes that an application hands it.
 * **Index corruption.** A local index that disagrees with the tree is a consensus fault, not a cache miss, which is
   why section 5 makes a node stop.
 * **The treasury as signer.** The node takes any transaction whose signer is the treasury address for the subsidy
