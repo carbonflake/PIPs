@@ -489,12 +489,22 @@ asks its user, then signs an `AssetAccept`, or an acceptance that a sponsor subm
 
 `Value()` is 0. `Check`: the asset exists; `From` has a holding of the asset with at most `MaxBurn` units;
 `h > LockedUntil`, where `h` is the height of the block and `LockedUntil` that of the holding; the asset does not have
-a policy whose `Collector` is `From` while `TeamRate.Current` is above 0; and, with `Deposit` the amount posted in the
-record, `PAC(From) + Deposit >= fee` and `PAC(From) <= MaxNanoPAC - Deposit + fee`, which has no negative step
-([PIP-54](./pip-54.md)). `Execute`: add the units of the holding to the `Burned` of the asset, with no rate, as for a
-transfer to the zero address; set `PAC(From)` to `PAC(From) + Deposit - fee`; subtract `Deposit` from `DepositTotal`;
-turn the record into a `FreeRecord` and push it on the free stack (section 2.1). The units that were burned are gone
-with the record, so the sum of the holdings still equals `Issued - Burned`.
+a policy whose `Collector` is `From` while `TeamRate.Current` is above 0; and the PAC condition below, with `Deposit`
+the amount posted in the record. `Execute`: add the units of the holding to the `Burned` of the asset, with no rate,
+as for a transfer to the zero address; change `PAC(From)` as below; subtract `Deposit` from `DepositTotal`; turn the
+record into a `FreeRecord` and push it on the free stack (section 2.1). The units that were burned are gone with the
+record, so the sum of the holdings still equals `Issued - Burned`.
+
+```text
+if Deposit >= fee:   Check    PAC(From) <= MaxNanoPAC - (Deposit - fee)
+                     Execute  PAC(From) = PAC(From) + (Deposit - fee)
+otherwise:           Check    PAC(From) >= fee - Deposit
+                     Execute  PAC(From) = PAC(From) - (fee - Deposit)
+```
+
+Both branches give `PAC(From) + Deposit - fee` without ever forming that sum: `Deposit` and `fee` both lie in
+`0 .. MaxNanoPAC`, so no subtraction is negative and no value leaves `0 .. MaxNanoPAC` ([PIP-54](./pip-54.md)), and a
+close that leaves the balance at exactly `MaxNanoPAC` is valid.
 
 The fee is taken from the refund, so that an account that has locked all its PAC can still close, as with the deposit
 of an anchor in [PIP-50](./pip-50.md). The refund is the `Deposit` recorded when the holding was placed, not the
@@ -549,12 +559,12 @@ version of a transaction is 1), so an acceptance never verifies as a transaction
 
 `Value()` is `HoldingDeposit`, paid by `From`. `BasicCheck`: `Owner` is an account address and is not `From`;
 `OwnerPublicKey` is the key of `Owner`, checked as the node checks the key of the signer of a transaction. `Check`:
-the height `h` of the block satisfies `h <= Expiry <= h + TransactionToLiveInterval`; `OwnerSignature` verifies on the
-acceptance, built with the genesis hash of the network, which the node gives to `Check` so that `BasicCheck` needs no
-state; the asset exists; `Owner` has no holding of the asset yet; `PAC(From) >= Value + fee`; if there is no free
-slot, the tree has room for one more record. `Execute`: debit `Value + fee` from `From`; add `Value` to
-`DepositTotal`; place a `HoldingRecord` of `Owner` for the asset with `Balance = 0`, `Deposit = Value` and
-`LockedUntil = Expiry` (section 2.1).
+`Expiry >= h`, `h` being the height of the block, and then `Expiry - h <= TransactionToLiveInterval`, so that no sum
+of heights is formed; `OwnerSignature` verifies on the acceptance, built with the genesis hash of the network, which
+the node gives to `Check` so that `BasicCheck` needs no state; the asset exists; `Owner` has no holding of the asset
+yet; `PAC(From) >= Value + fee`; if there is no free slot, the tree has room for one more record. `Execute`: debit
+`Value + fee` from `From`; add `Value` to `DepositTotal`; place a `HoldingRecord` of `Owner` for the asset with
+`Balance = 0`, `Deposit = Value` and `LockedUntil = Expiry` (section 2.1).
 
 The deposit is a gift of the sponsor to the owner. The holding is an ordinary holding, locked only until the
 acceptance expires (below): its owner closes it with `AssetClose` and gets the deposit back, less the fee of the
@@ -966,13 +976,15 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   `Burned`, no rate applies, and the sum of the holdings still equals `Issued - Burned`. Rejected: an unknown asset,
   an account with no holding, a balance above `MaxBurn` (even by one unit), another account's holding, a holding with
   `h <= LockedUntil`, the collector while `TeamRate.Current` is above 0, a `MaxBurn` above `MaxAssetSupply`, and a
-  refund that would take the PAC balance above `MaxNanoPAC`. An account with 0 PAC and a deposit that covers the fee
-  can close. A holding placed by `AssetCreate` or `AssetAccept` has a `LockedUntil` of 0 and can be closed at once.
-  After two closes, two accepts take the slots in the reverse order of the closes, the tree grows by no record, and
-  `FreeHead` ends at `NoRecord`. A `HoldingDeposit` that a later version changes does not alter the refund of an old
-  record. A closed account that accepts again gets a record that is unrelated to the old one. Units sent to an owner
-  after it signed a close with `MaxBurn` at 0 make that close fail and cost the owner only the new signature; the same
-  close with a `MaxBurn` above the dust goes through and burns it.
+  close that would take the PAC balance above `MaxNanoPAC`. At the PAC bounds: with `PAC(From) = MaxNanoPAC`, a close
+  with `Deposit = fee` is valid and one with `Deposit > fee` is rejected; with `fee > Deposit`, a close is rejected at
+  `PAC(From) = 0` and valid at `PAC(From) = fee - Deposit`, which leaves 0. An account with 0 PAC and a deposit that
+  covers the fee can close. A holding placed by `AssetCreate` or `AssetAccept` has a `LockedUntil` of 0 and can be
+  closed at once. After two closes, two accepts take the slots in the reverse order of the closes, the tree grows by
+  no record, and `FreeHead` ends at `NoRecord`. A `HoldingDeposit` that a later version changes does not alter the
+  refund of an old record. A closed account that accepts again gets a record that is unrelated to the old one. Units
+  sent to an owner after it signed a close with `MaxBurn` at 0 make that close fail and cost the owner only the new
+  signature; the same close with a `MaxBurn` above the dust goes through and burns it.
 * **Transfer.** One recipient and eight succeed; nine fail. Rejected: a repeated `To`, `To == From`, a validator
   recipient, an amount of 0 or below, a `MaxRate` above 10 000, an unknown asset, a balance that is too small, a
   recipient that has not accepted the asset, and 8 recipients of `2^62` each (the overflow case of PIP-54), which
@@ -1021,8 +1033,10 @@ Implementations MUST pass at least these. They add no rule to the Specification.
   transfer to the account that signed it, skipped in the first pass of a proposer, are included in the same block
   after a second pass. Records with the same bytes give different leaves: a tree of 5 records and a tree of 8 records
   that adds three copies of its last record, an `AssetRecord`, have different roots, and so do trees of n and n + 1
-  records that end with copies of one record. An asset transaction whose `From` is the treasury address is rejected by
-  `BasicCheck` without a signature, by the pool, and in a block, and the balance of the treasury does not change.
+  records that end with copies of one record. An `Expiry` of `2^32 - 1` is compared without overflow, and rejected
+  while it is more than `TransactionToLiveInterval` blocks ahead. An asset transaction whose `From` is the treasury
+  address is rejected by `BasicCheck` without a signature, by the pool, and in a block, and the balance of the
+  treasury does not change.
 * **Room for later PIPs.** Every payload that names an asset rejects an `AssetID` of 0 in `BasicCheck`. No
   `AssetCreate` gives an asset the zero address as `Issuer`, and `AssetMint` and `AssetSetRate` never pass with the
   treasury as `From`. No payload of this PIP creates a record of kind 4 or more. The header has 13 bytes, and the
@@ -1082,6 +1096,8 @@ below, with the results published. Each step tests a failure, not only the path 
 every sum is checked before it is added, and the invariants of section 2.3 are checked in tests. A credit cannot
 overflow, because a balance never exceeds the supply of its asset. The test with 8 recipients of `2^62` is mandatory.
 The same care applies to PAC: `Value() + fee` and every balance are bounded by `MaxNanoPAC` before the sum.
+`AssetClose`, the one payload that gives PAC back, applies the difference between its deposit and its fee in a single
+direction, with no intermediate sum (section 3.8), and no rule adds two heights (section 3.9).
 
 ### State growth
 
